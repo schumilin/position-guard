@@ -12,7 +12,7 @@ import webbrowser
 
 from . import VERSION, system
 from .alerts import Alerter
-from .config import ENVS, ConfigStore
+from .config import ConfigStore
 from .engine import Engine
 from .paths import APP_TITLE, data_dir
 from .web import start_server
@@ -94,7 +94,8 @@ def run_menubar(rt: Runtime) -> None:
             try:  # 引擎在另一个线程里改状态，这里只读快照，读失败下一秒再来
                 self.title = f"{ICONS.get(engine.status, '⏳')} 哨兵"
                 self.status_item.title = engine.status_text[:60]
-                self.env_item.title = f"环境：{ENVS[engine.cfg.env]}"
+                coins = "、".join(w.coin for w in list(engine.cfg.watch) if w.enabled) or "无"
+                self.env_item.title = f"盯盘：{coins}"[:60]
                 self.pause_item.title = "恢复自动平仓" if engine.cfg.paused else "暂停自动平仓"
                 ringing = engine.alerter.sounding or any(not a["acked"] for a in list(engine.alarms.values()))
                 self.ack_item.set_callback(self.ack if ringing else None)

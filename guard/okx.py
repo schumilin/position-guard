@@ -1,6 +1,6 @@
 """OKX v5 REST / WebSocket 客户端，只包含本程序用到的接口。
 
-本程序只调用两个会改变账户的接口：市价全平 close-position、只减仓的市价单。没有任何开仓代码。
+会改变账户的接口只有平仓相关的：追逐委托（只减仓）、撤销追逐委托、市价全平 close-position、只减仓的市价单。没有任何开仓代码。
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ REST_HOSTS = ["www.okx.com", "openapi.okx.com"]
 
 AUTH_CODES = {
     "50100": "这把 API Key 已被冻结",
-    "50101": "Key 和当前环境不匹配：模拟盘 Key 只能用在模拟盘，实盘 Key 只能用在实盘",
+    "50101": "这把 Key 是模拟盘的，本程序只支持实盘 Key",
     "50103": "缺少 API Key",
     "50104": "缺少 Passphrase",
     "50105": "Passphrase 不对",
@@ -87,16 +87,14 @@ def ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context(cafile=certifi.where())
 
 
-def ws_urls(demo: bool, kind: str) -> list[str]:
-    hosts = ["wss://wspap.okx.com:8443", "wss://wspap.okx.com"] if demo else ["wss://ws.okx.com:8443", "wss://ws.okx.com"]
-    return [f"{h}/ws/v5/{kind}" for h in hosts]
+def ws_urls(kind: str) -> list[str]:
+    return [f"{h}/ws/v5/{kind}" for h in ("wss://ws.okx.com:8443", "wss://ws.okx.com")]
 
 
 class OkxRest:
-    def __init__(self, session: aiohttp.ClientSession, *, demo: bool, creds: dict | None,
+    def __init__(self, session: aiohttp.ClientSession, *, creds: dict | None,
                  proxy_getter: Callable[[], str | None]):
         self.session = session
-        self.demo = demo
         self.creds = creds
         self.proxy_getter = proxy_getter
         self.host_idx = 0
@@ -110,7 +108,7 @@ class OkxRest:
         dt = datetime.fromtimestamp(self.now_ms() / 1000, tz=timezone.utc)
         return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
-    async def request(self, method: str, path: str, *, params: dict | None = None, body: dict | None = None,
+    async def request(self, method: str, path: str, *, params: dict | None = None, body: dict | list | None = None,
                       auth: bool = False, timeout: float = 10):
         if params:
             params = {k: v for k, v in params.items() if v not in (None, "")}
@@ -120,8 +118,6 @@ class OkxRest:
         for _ in range(len(REST_HOSTS)):
             host = REST_HOSTS[self.host_idx]
             headers = {"Content-Type": "application/json", "Accept": "application/json"}
-            if self.demo:
-                headers["x-simulated-trading"] = "1"
             if auth:
                 if not self.creds:
                     raise OkxError("50103", "未设置 API Key")
@@ -188,6 +184,25 @@ class OkxRest:
     async def close_position(self, inst_id: str, mgn_mode: str, pos_side: str) -> list:
         body = {"instId": inst_id, "mgnMode": mgn_mode, "posSide": pos_side, "autoCxl": True}
         return await self.request("POST", "/api/v5/trade/close-position", body=body, auth=True)
+
+    async def place_chase(self, inst_id: str, td_mode: str, side: str, sz: str, pos_side: str, net_mode: bool,
+                          max_chase_ratio: float) -> str:
+        """追逐委托：挂在买一 / 卖一价，每秒跟随调整；偏离首次挂单价超过 max_chase_ratio 时 OKX 自动撤单。"""
+        body = {"instId": inst_id, "tdMode": td_mode, "side": side, "ordType": "chase", "sz": sz,
+                "maxChaseType": "ratio", "maxChaseVal": f"{max_chase_ratio:.6f}".rstrip("0").rstrip(".")}
+        if net_mode:
+            body["reduceOnly"] = True
+        else:
+            body["posSide"] = pos_side
+        data = await self.request("POST", "/api/v5/trade/order-algo", body=body, auth=True)
+        return data[0]["algoId"]
+
+    async def algo_detail(self, algo_id: str) -> dict:
+        return (await self.request("GET", "/api/v5/trade/order-algo", params={"algoId": algo_id}, auth=True))[0]
+
+    async def cancel_algo(self, inst_id: str, algo_id: str) -> list:
+        return await self.request("POST", "/api/v5/trade/cancel-algos", body=[{"algoId": algo_id, "instId": inst_id}],
+                                  auth=True)
 
     async def reduce_market(self, inst_id: str, td_mode: str, side: str, sz: str, pos_side: str, net_mode: bool) -> list:
         body = {"instId": inst_id, "tdMode": td_mode, "side": side, "ordType": "market", "sz": sz}

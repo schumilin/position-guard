@@ -1,7 +1,7 @@
 """规则判断（纯函数，便于测试）。
 
 涨跌幅 = (当前标记价 − 锚点价) ÷ 锚点价，锚点价见 PriceSeries.anchor。
-方向：「不利」= 多单遇跌、空单遇涨；「有利」= 多单遇涨、空单遇跌。
+规则「N 分钟涨 / 跌 X%」只在标的的价格条件（高于 / 低于某价）当下满足时才生效，这一层在引擎里判断。
 """
 from __future__ import annotations
 
@@ -23,10 +23,10 @@ class Evaluation:
     cur_px: float
     change_pct: float   # 标记价涨跌幅，正数 = 涨
     move_pct: float     # 朝本规则方向的幅度，正数 = 往触发方向走
-    hit: bool
+    hit: bool           # 只看涨跌幅是否达到，不含价格条件
 
 
-def evaluate(rule: Rule, side: str, series: PriceSeries, now_ms: int, cur_px: float) -> Evaluation | None:
+def evaluate(rule: Rule, series: PriceSeries, now_ms: int, cur_px: float) -> Evaluation | None:
     target = now_ms - int(round(rule.window_min * 60_000))
     found = series.anchor(target)
     if found is None or cur_px <= 0:
@@ -35,8 +35,7 @@ def evaluate(rule: Rule, side: str, series: PriceSeries, now_ms: int, cur_px: fl
     if anchor_px <= 0:
         return None
     change = (cur_px - anchor_px) / anchor_px * 100.0
-    favorable = change if side == "long" else -change
-    move = -favorable if rule.direction == "adverse" else favorable
+    move = change if rule.direction == "up" else -change
     return Evaluation(rule, target, anchor_ts, anchor_px, cur_px, change, move, move >= rule.threshold_pct - 1e-9)
 
 
@@ -71,5 +70,4 @@ def split_size(total: Decimal, max_sz: Decimal | None, lot_sz: Decimal) -> list[
 
 
 def fmt_size(d: Decimal) -> str:
-    s = format(d.normalize(), "f")
-    return s
+    return format(d.normalize(), "f")

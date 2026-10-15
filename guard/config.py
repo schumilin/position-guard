@@ -1,4 +1,4 @@
-"""配置：规则 + 运行设置，存成 JSON。"""
+"""配置：盯盘列表（标的 + 价格条件 + 规则）和运行设置，存成 JSON。"""
 from __future__ import annotations
 
 import json
@@ -11,9 +11,9 @@ from pathlib import Path
 
 from .paths import data_dir
 
-ACTIONS = {"close_all": "市价全平", "close_pct": "按比例平仓", "alert": "只报警"}
-DIRECTIONS = {"adverse": "不利", "favorable": "有利"}
-ENVS = {"demo": "模拟盘", "live": "实盘"}
+ACTIONS = {"close_all": "全平", "close_pct": "按比例平仓", "alert": "只报警"}
+DIRECTIONS = {"up": "涨", "down": "跌"}
+GATE_SIDES = {"above": "高于", "below": "低于"}
 PROXY_MODES = ("auto", "manual", "off")
 MAX_WINDOW_MIN = 360
 INST_RE = re.compile(r"^[A-Z0-9]+-[A-Z0-9]+-SWAP$")
@@ -23,7 +23,7 @@ INST_RE = re.compile(r"^[A-Z0-9]+-[A-Z0-9]+-SWAP$")
 class Rule:
     id: str
     window_min: float
-    direction: str
+    direction: str        # up / down：标记价涨 / 跌
     threshold_pct: float
     action: str
     close_pct: float = 50.0
@@ -44,13 +44,13 @@ class Rule:
         if window * 60 < 2:
             raise ValueError("时间窗口至少 2 秒（0.04 分钟）")
         if not 0 < threshold < 100:
-            raise ValueError("涨跌幅阈值要大于 0% 且小于 100%")
+            raise ValueError("涨跌幅要大于 0% 且小于 100%")
         if direction not in DIRECTIONS:
-            raise ValueError("方向只能是「不利」或「有利」")
+            raise ValueError("方向只能是「涨」或「跌」")
         if action not in ACTIONS:
-            raise ValueError("动作只能是市价全平、按比例平仓或只报警")
+            raise ValueError("动作只能是全平、按比例平仓或只报警")
         if action == "close_pct" and not 1 <= close_pct <= 99:
-            raise ValueError("平仓比例要在 1% 到 99% 之间（要全平请选「市价全平」）")
+            raise ValueError("平仓比例要在 1% 到 99% 之间（要全平请选「全平」）")
         rid = str(d.get("id") or uuid.uuid4().hex[:8])
         return cls(rid, window, direction, threshold, action, close_pct, bool(d.get("enabled", True)))
 
@@ -65,39 +65,71 @@ def parse_rules(items) -> list[Rule]:
     return rules
 
 
-def parse_overrides(d) -> dict[str, list[Rule]]:
-    if not isinstance(d, dict):
-        raise ValueError("单币规则格式不对")
-    out = {}
-    for inst_id, items in d.items():
+@dataclass
+class Watch:
+    """一个盯盘标的：先过价格条件，再看规则。"""
+    inst_id: str
+    gate_side: str        # above / below
+    gate_px: float
+    rules: list[Rule] = field(default_factory=list)
+    enabled: bool = True
+
+    @property
+    def coin(self) -> str:
+        return self.inst_id.split("-")[0]
+
+    def gate_ok(self, px: float) -> bool:
+        return px >= self.gate_px if self.gate_side == "above" else px <= self.gate_px
+
+    @classmethod
+    def parse(cls, d: dict) -> "Watch":
+        inst_id = str(d.get("inst_id") or "").strip().upper()
         if not INST_RE.match(inst_id):
-            raise ValueError(f"合约名称不对：{inst_id}（应该像 BTC-USDT-SWAP 这样）")
-        out[inst_id] = parse_rules(items)
+            raise ValueError(f"合约名称不对：{inst_id or '空'}（应该像 BTC-USDT-SWAP 这样）")
+        coin = inst_id.split("-")[0]
+        if d.get("gate_side") not in GATE_SIDES:
+            raise ValueError(f"{coin}：请先设置价格条件（高于还是低于）")
+        try:
+            gate_px = float(d.get("gate_px"))
+        except (TypeError, ValueError):
+            raise ValueError(f"{coin}：请先填写价格条件里的价格") from None
+        if not gate_px > 0:
+            raise ValueError(f"{coin}：价格条件里的价格要大于 0")
+        try:
+            rules = parse_rules(d.get("rules") or [])
+        except ValueError as e:
+            raise ValueError(f"{coin}：{e}") from None
+        return cls(inst_id, d["gate_side"], gate_px, rules, bool(d.get("enabled", True)))
+
+
+def parse_watch_list(items) -> list[Watch]:
+    if not isinstance(items, list):
+        raise ValueError("盯盘列表格式不对")
+    out = [Watch.parse(x) for x in items]
+    insts = [w.inst_id for w in out]
+    if len(set(insts)) != len(insts):
+        raise ValueError("同一个合约只能添加一次")
     return out
 
 
 @dataclass
 class Config:
-    env: str = "live"
     proxy_mode: str = "auto"
     proxy_url: str = ""
     paused: bool = False
-    default_rules: list[Rule] = field(default_factory=list)
-    overrides: dict[str, list[Rule]] = field(default_factory=dict)
+    watch: list[Watch] = field(default_factory=list)
+    chase_timeout_sec: float = 30.0   # 追逐委托多久没全部成交就改市价
+    chase_max_pct: float = 1.0        # 最大追逐距离（相对首次挂单价的百分比），超过 OKX 会撤单
     feishu_webhook: str = ""
     autostart: bool = True
     sample_interval_sec: float = 1.0
     stale_sec: float = 30.0
 
-    def rules_for(self, inst_id: str) -> list[Rule]:
-        rules = self.overrides.get(inst_id, self.default_rules)
-        return [r for r in rules if r.enabled]
-
-    def all_rules(self) -> list[Rule]:
-        return list(self.default_rules) + [r for rs in self.overrides.values() for r in rs]
+    def watch_for(self, inst_id: str) -> Watch | None:
+        return next((w for w in self.watch if w.inst_id == inst_id), None)
 
     def max_window_min(self) -> float:
-        return max((r.window_min for r in self.all_rules()), default=0.0)
+        return max((r.window_min for w in self.watch for r in w.rules), default=0.0)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -105,37 +137,30 @@ class Config:
     @classmethod
     def from_dict(cls, d: dict) -> "Config":
         cfg = cls()
-        if d.get("env") in ENVS:
-            cfg.env = d["env"]
         if d.get("proxy_mode") in PROXY_MODES:
             cfg.proxy_mode = d["proxy_mode"]
         cfg.proxy_url = str(d.get("proxy_url") or "")
         cfg.paused = bool(d.get("paused", False))
         cfg.feishu_webhook = str(d.get("feishu_webhook") or "")
         cfg.autostart = bool(d.get("autostart", True))
-        for key in ("sample_interval_sec", "stale_sec"):
+        for key in ("sample_interval_sec", "stale_sec", "chase_timeout_sec", "chase_max_pct"):
             try:
                 setattr(cfg, key, float(d.get(key, getattr(cfg, key))))
             except (TypeError, ValueError):
                 pass
-        try:
-            cfg.default_rules = parse_rules(d.get("default_rules") or [])
-        except ValueError:
-            cfg.default_rules = []
-        try:
-            cfg.overrides = parse_overrides(d.get("overrides") or {})
-        except ValueError:
-            cfg.overrides = {}
+        watch = []
+        for item in d.get("watch") or []:  # 坏掉的条目跳过，不影响其他标的
+            try:
+                watch.append(Watch.parse(item))
+            except (ValueError, AttributeError):
+                pass
+        cfg.watch = watch
         return cfg
 
 
 def validate_settings(d: dict) -> dict:
     """面板「设置」页提交的字段，校验后返回可直接写入 Config 的部分。"""
     out = {}
-    if "env" in d:
-        if d["env"] not in ENVS:
-            raise ValueError("环境只能是模拟盘或实盘")
-        out["env"] = d["env"]
     if "proxy_mode" in d:
         if d["proxy_mode"] not in PROXY_MODES:
             raise ValueError("代理模式不对")
@@ -147,6 +172,22 @@ def validate_settings(d: dict) -> dict:
         out["proxy_url"] = url
     if out.get("proxy_mode", d.get("proxy_mode")) == "manual" and not out.get("proxy_url", d.get("proxy_url")):
         raise ValueError("选了手动代理，就要填代理地址")
+    if "chase_timeout_sec" in d:
+        try:
+            v = float(d["chase_timeout_sec"])
+        except (TypeError, ValueError):
+            raise ValueError("超时秒数格式不对") from None
+        if not 3 <= v <= 600:
+            raise ValueError("追逐委托超时要在 3 到 600 秒之间")
+        out["chase_timeout_sec"] = v
+    if "chase_max_pct" in d:
+        try:
+            v = float(d["chase_max_pct"])
+        except (TypeError, ValueError):
+            raise ValueError("最大追逐距离格式不对") from None
+        if not 0.05 <= v <= 20:
+            raise ValueError("最大追逐距离要在 0.05% 到 20% 之间")
+        out["chase_max_pct"] = v
     if "feishu_webhook" in d:
         url = str(d["feishu_webhook"] or "").strip()
         if url and not url.startswith("https://"):

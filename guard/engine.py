@@ -1,9 +1,12 @@
 """监控引擎。
 
 数据流：
-  公共 WS mark-price ─> last_px ─(每秒采样)─> PriceSeries
-                          └─(每个新价格 + 每秒)─> 规则判断 ─> 平仓 / 报警
+  公共 WS mark-price（只订阅盯盘标的）─> last_px ─(每秒采样)─> PriceSeries
+                                         └─(每个新价格 + 每秒)─> 价格条件 + 规则判断 ─> 平仓 / 报警
   私有 WS positions + REST 每 15 秒对账 ─> positions
+
+触发 = 标的的价格条件当下满足（标记价高于 / 低于设定价）且 某条规则「N 分钟涨 / 跌 X%」达到。
+平仓 = 这个标的上的所有仓位（多空都平），先用追逐委托，超时或被撤单就把剩余部分改市价平。
 """
 from __future__ import annotations
 
@@ -22,8 +25,8 @@ from . import VERSION
 from . import creds as creds_mod
 from . import proxy as proxy_mod
 from .alerts import SOUND_INFO, Alerter
-from .config import ACTIONS, DIRECTIONS, ENVS, ConfigStore, Rule
-from .okx import (NetworkError, OkxError, OkxRest, OkxWs, explain, ssl_context, ws_login_args, ws_urls)
+from .config import ACTIONS, DIRECTIONS, GATE_SIDES, ConfigStore, Rule, Watch
+from .okx import NetworkError, OkxError, OkxRest, OkxWs, explain, ssl_context, ws_login_args, ws_urls
 from .paths import data_dir
 from .rules import Evaluation, evaluate, fmt_size, partial_size, pick, split_size
 from .series import PriceSeries
@@ -31,6 +34,7 @@ from .series import PriceSeries
 log = logging.getLogger(__name__)
 
 POSITION_GONE = {"51023", "51169"}
+CHASE_DONE_STATES = {"canceled", "order_failed", "partially_failed", "effective"}
 SIDE_CN = {"long": "多单", "short": "空单"}
 
 
@@ -64,9 +68,13 @@ def fmt_clock(ts_ms: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(ts_ms / 1000))
 
 
+def gate_text(w: Watch) -> str:
+    return f"标记价{GATE_SIDES[w.gate_side]} {fmt_px(w.gate_px)}"
+
+
 def rule_text(r: Rule) -> str:
     act = f"平 {r.close_pct:g}%" if r.action == "close_pct" else ACTIONS[r.action]
-    return f"{fmt_window(r.window_min)}内{DIRECTIONS[r.direction]}变动 ≥ {r.threshold_pct:g}% → {act}"
+    return f"{fmt_window(r.window_min)}内{DIRECTIONS[r.direction]} ≥ {r.threshold_pct:g}% → {act}"
 
 
 @dataclass
@@ -81,6 +89,7 @@ class Position:
     upl: str
     upl_ratio: str
     liq_px: str
+    mark_px: str
     c_time: int
     attached_sl: bool
 
@@ -98,6 +107,7 @@ class Position:
             upl=str(d.get("upl") or ""),
             upl_ratio=str(d.get("uplRatio") or ""),
             liq_px=str(d.get("liqPx") or ""),
+            mark_px=str(d.get("markPx") or ""),
             c_time=_int(d.get("cTime")),
             attached_sl=any(a.get("slTriggerPx") for a in algos if isinstance(a, dict)),
         )
@@ -116,18 +126,22 @@ class Position:
     def coin(self) -> str:
         return self.inst_id.split("-")[0]
 
+    @property
+    def label(self) -> str:
+        return f"{self.coin} {SIDE_CN[self.side]} {self.size.normalize():f} 张"
+
 
 class Engine:
     def __init__(self, store: ConfigStore, alerter: Alerter, *, clock=time.time) -> None:
         self.store = store
         self.alerter = alerter
         self.clock = clock
+        self.chase_poll_sec = 1.0
         self.session: aiohttp.ClientSession | None = None
         self.rest: OkxRest | None = None
         self.pub_ws: OkxWs | None = None
         self.priv_ws: OkxWs | None = None
         self.creds: dict | None = None
-        self.creds_present = {"demo": False, "live": False}
         self.tasks: list[asyncio.Task] = []
         self.side_tasks: set[asyncio.Task] = set()
         self.events: deque = deque(maxlen=300)
@@ -143,9 +157,10 @@ class Engine:
         self.series: dict[str, PriceSeries] = {}
         self.last_px: dict[str, tuple[float, float]] = {}
         self.instruments: dict[str, dict] = {}
-        self.cooldowns: dict[tuple[str, str, str], float] = {}
+        self.cooldowns: dict[tuple[str, str], float] = {}
         self.in_flight: set[str] = set()
         self.evals: dict[str, list[tuple[Evaluation, float]]] = {}
+        self.gates: dict[str, bool] = {}
         self.algo_sl: dict[str, bool] = {}
         self.checks: dict[str, dict] = {}
         self.alarms: dict[str, dict] = {}
@@ -187,10 +202,8 @@ class Engine:
             self.check_done = asyncio.Event()
         self._proxy_at = 0
         self.session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context()), trust_env=False)
-        for env in ENVS:
-            self.creds_present[env] = creds_mod.load(env) is not None
-        self.creds = creds_mod.load(self.cfg.env)
-        self.rest = OkxRest(self.session, demo=self.cfg.env == "demo", creds=self.creds, proxy_getter=self.proxy)
+        self.creds = creds_mod.load()
+        self.rest = OkxRest(self.session, creds=self.creds, proxy_getter=self.proxy)
         self._spawn(self._health_loop())
         if not self.creds:
             self.check_done.set()
@@ -234,7 +247,7 @@ class Engine:
             log.exception("background task crashed")
 
     async def _bootstrap(self) -> None:
-        self.event("info", f"开始连接 OKX（{ENVS[self.cfg.env]}）")
+        self.event("info", "开始连接 OKX")
         while not await self._self_check():
             self.check_done.set()
             if self.fatal:
@@ -242,11 +255,10 @@ class Engine:
             await asyncio.sleep(10)
         self.check_done.set()
         self.ready = True
-        await self._reconcile_positions()
-        demo = self.cfg.env == "demo"
-        self.pub_ws = OkxWs("public", ws_urls(demo, "public"), self.session, self.proxy, self._on_public)
-        self.priv_ws = OkxWs("private", ws_urls(demo, "private"), self.session, self.proxy, self._on_private,
+        self.pub_ws = OkxWs("public", ws_urls("public"), self.session, self.proxy, self._on_public)
+        self.priv_ws = OkxWs("private", ws_urls("private"), self.session, self.proxy, self._on_private,
                              login_args=lambda: ws_login_args(self.creds, self.rest.now_ms()))
+        await self._reconcile_positions()
         await self.priv_ws.subscribe([{"channel": "positions", "instType": "SWAP"}])
         await self._sync_subscriptions()
         self._spawn(self.pub_ws.run())
@@ -255,7 +267,7 @@ class Engine:
         self._spawn(self._every(15, self._reconcile_positions))
         self._spawn(self._every(60, self._refresh_algos))
         self._spawn(self._every(600, self._sync_time))
-        self.event("info", "监控已启动", self._rules_summary())
+        self.event("info", "监控已启动", self.watch_summary())
 
     async def _every(self, sec: float, fn) -> None:
         while True:
@@ -289,7 +301,7 @@ class Engine:
         sec = abs(offset) / 1000
         checks["time"] = ({"state": "ok", "label": "时间", "msg": f"电脑时间准确（偏差 {sec:.1f} 秒）"} if sec < 5 else
                           {"state": "warn", "label": "时间", "msg": f"电脑时间偏差 {sec:.0f} 秒，程序已自动校正"})
-        result = await self.verify_key(self.cfg.env, self.creds, rest=self.rest)
+        result = await self.verify_key(self.creds, rest=self.rest)
         checks.update(result["checks"])
         if result["fatal"]:
             self._set_fatal(result["fatal"])
@@ -300,12 +312,12 @@ class Engine:
         self.net_mode = self.acct.get("posMode") != "long_short_mode"
         return True
 
-    async def verify_key(self, env: str, creds: dict, rest: OkxRest | None = None) -> dict:
+    async def verify_key(self, creds: dict, rest: OkxRest | None = None) -> dict:
         """检查一把 Key：能否登录、权限是否恰好是「读取 + 交易」。"""
         own_session = None
         if rest is None:
             own_session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context()), trust_env=False)
-            rest = OkxRest(own_session, demo=env == "demo", creds=creds, proxy_getter=self.proxy)
+            rest = OkxRest(own_session, creds=creds, proxy_getter=self.proxy)
         checks: dict[str, dict] = {}
         out = {"ok": False, "fatal": None, "checks": checks, "acct": {}}
         try:
@@ -364,9 +376,8 @@ class Engine:
                 px = float(d["markPx"])
             except (KeyError, TypeError, ValueError):
                 continue
-            if not inst or px <= 0:
-                continue
-            self.on_price(inst, px, now)
+            if inst and px > 0:
+                self.on_price(inst, px, now)
 
     def on_price(self, inst: str, px: float, now: float) -> None:
         self.last_px[inst] = (px, now)
@@ -376,7 +387,7 @@ class Engine:
         self.evaluate_inst(inst, now)
 
     def sample(self, now: float) -> None:
-        """每秒采样一次：把每个合约的最新标记价记一个点。"""
+        """每秒采样一次：把每个盯盘标的的最新标记价记一个点。"""
         now_ms = int(now * 1000)
         keep_ms = int((max(self.cfg.max_window_min(), 15) + 2) * 60_000)
         for inst, (px, ts) in list(self.last_px.items()):
@@ -384,8 +395,8 @@ class Engine:
             if now - ts <= self.cfg.stale_sec:
                 series.append(now_ms, px)
             series.prune(now_ms - keep_ms)
-        for inst in {p.inst_id for p in self.positions.values()}:
-            self.evaluate_inst(inst, now)
+        for w in self.cfg.watch:
+            self.evaluate_inst(w.inst_id, now)
 
     async def _sampler_loop(self) -> None:
         while True:
@@ -396,10 +407,22 @@ class Engine:
             except Exception:
                 log.exception("sample failed")
 
+    def on_watch_changed(self) -> None:
+        """盯盘列表改了：清掉不再盯的标的的判断结果，新标的开始订阅行情。"""
+        watched = {w.inst_id for w in self.cfg.watch}
+        for inst in list(self.evals):
+            if inst not in watched:
+                self.evals.pop(inst, None)
+                self.gates.pop(inst, None)
+        for key in [k for k in self.alarms if k.startswith("stale:") and k[6:] not in watched]:
+            self.alarms.pop(key, None)
+        if self._has_loop():
+            self._spawn_side(self._sync_subscriptions())
+
     async def _sync_subscriptions(self) -> None:
         if self.pub_ws is None:
             return
-        need = [i for i in {p.inst_id for p in self.positions.values()} if i not in self.subscribed]
+        need = [w.inst_id for w in self.cfg.watch if w.inst_id not in self.subscribed]
         if not need:
             return
         for inst in need:
@@ -409,7 +432,7 @@ class Engine:
         await self.pub_ws.subscribe([{"channel": "mark-price", "instId": i} for i in need])
 
     async def _backfill(self, inst: str) -> None:
-        """刚开始监控一个合约时，用 1 分钟标记价 K 线收盘价补齐过去的数据，让窗口一开始就是满的。"""
+        """刚开始盯一个标的时，用 1 分钟标记价 K 线收盘价补齐过去的数据，让窗口一开始就是满的。"""
         minutes = max(self.cfg.max_window_min(), 15)
         try:
             rows = await self.rest.mark_candles(inst, min(100, int(math.ceil(minutes)) + 2))
@@ -428,86 +451,162 @@ class Engine:
         n = self.series.setdefault(inst, PriceSeries()).backfill(points)
         log.info("backfill %s: %d points", inst, n)
 
-    # ------------------------------------------------------------------ 规则判断
+    # ------------------------------------------------------------------ 判断
+    def positions_on(self, inst: str) -> list[Position]:
+        return [p for p in self.positions.values() if p.inst_id == inst]
+
     def evaluate_inst(self, inst: str, now: float) -> None:
+        w = self.cfg.watch_for(inst)
+        if w is None or not w.enabled:
+            self.evals.pop(inst, None)
+            self.gates.pop(inst, None)
+            return
         last = self.last_px.get(inst)
         series = self.series.get(inst)
         if last is None or series is None:
             return
         px, px_ts = last
         fresh = now - px_ts <= self.cfg.stale_sec
+        gate = w.gate_ok(px)
+        self.gates[inst] = gate
         now_ms = int(now * 1000)
-        rules = self.cfg.rules_for(inst)
-        for p in [p for p in self.positions.values() if p.inst_id == inst]:
-            results: list[tuple[Evaluation, float]] = []
-            hits: list[Evaluation] = []
-            for r in rules:
-                ev = evaluate(r, p.side, series, now_ms, px)
-                if ev is None:
-                    continue
-                cd_until = self.cooldowns.get((inst, p.side, r.id), 0.0)
-                results.append((ev, cd_until))
-                if ev.hit and cd_until <= now:
-                    hits.append(ev)
-            self.evals[p.pos_id] = results
-            if (not hits or not fresh or not self.ready or self.fatal or self.cfg.paused
-                    or p.pos_id in self.in_flight):
+        results: list[tuple[Evaluation, float]] = []
+        hits: list[Evaluation] = []
+        for r in w.rules:
+            if not r.enabled:
                 continue
-            chosen = pick(hits)
-            for h in hits:
-                self.cooldowns[(inst, p.side, h.rule.id)] = now + h.rule.window_min * 60
-            self.in_flight.add(p.pos_id)
-            self._spawn_side(self._execute(p, chosen, now))
+            ev = evaluate(r, series, now_ms, px)
+            if ev is None:
+                continue
+            cd_until = self.cooldowns.get((inst, r.id), 0.0)
+            results.append((ev, cd_until))
+            if ev.hit and gate and cd_until <= now:
+                hits.append(ev)
+        self.evals[inst] = results
+        if not hits or not fresh or not self.ready or self.fatal or self.cfg.paused or inst in self.in_flight:
+            return
+        positions = self.positions_on(inst)
+        actionable = [h for h in hits if h.rule.action == "alert" or positions]  # 没持仓时平仓规则无事可做
+        if not actionable:
+            return
+        chosen = pick(actionable)
+        for h in actionable:
+            self.cooldowns[(inst, h.rule.id)] = now + h.rule.window_min * 60
+        self.in_flight.add(inst)
+        self._spawn_side(self._execute(w, chosen, positions, now))
 
-    def _describe(self, p: Position, ev: Evaluation) -> str:
-        return (f"{p.coin} {SIDE_CN[p.side]}（{p.size.normalize():f} 张）：标记价 {fmt_clock(ev.anchor_ts)} 为 {fmt_px(ev.anchor_px)}，"
+    def _describe(self, w: Watch, ev: Evaluation) -> str:
+        return (f"{w.coin}：价格条件「{gate_text(w)}」满足；标记价 {fmt_clock(ev.anchor_ts)} 为 {fmt_px(ev.anchor_px)}，"
                 f"现在 {fmt_px(ev.cur_px)}，{fmt_window(ev.rule.window_min)}内 {ev.change_pct:+.2f}%。"
                 f"触发规则「{rule_text(ev.rule)}」")
 
     # ------------------------------------------------------------------ 执行
-    async def _execute(self, p: Position, ev: Evaluation, now: float) -> None:
+    async def _execute(self, w: Watch, ev: Evaluation, positions: list[Position], now: float) -> None:
         rule = ev.rule
-        desc = self._describe(p, ev)
+        desc = self._describe(w, ev)
         try:
             if rule.action == "alert":
-                self.event("trigger", f"{p.coin} {SIDE_CN[p.side]}触发报警规则", desc)
-                self._raise_alarm(f"rule:{p.pos_id}:{rule.id}:{int(now)}", f"仓位哨兵：{p.coin} 触发报警", desc, kind="event")
+                self.event("trigger", f"{w.coin} 触发报警规则", desc)
+                self._raise_alarm(f"rule:{w.inst_id}:{rule.id}:{int(now)}", f"仓位哨兵：{w.coin} 触发报警", desc, kind="event")
                 return
-            action, size, note = rule.action, None, ""
-            if action == "close_pct":
-                inst = await self._instrument(p.inst_id)
-                size = partial_size(p.size, rule.close_pct, _dec(inst.get("lotSz")), _dec(inst.get("minSz")))
-                if size is None:
-                    action, note = "close_all", "按比例算出的张数不够最小下单量（或剩余太少），改为全平。"
-            what = "市价全平" if action == "close_all" else f"平掉 {rule.close_pct:g}%（{fmt_size(size)} 张）"
-            self.event("trigger", f"{p.coin} {SIDE_CN[p.side]}触发规则，正在{what}", desc + note)
-            ok, err = await self._do_close(p, action, size)
-            if ok:
-                title = f"已自动{what}：{p.coin} {SIDE_CN[p.side]}"
-                detail = desc + (f"\n{note}" if note else "") + (f"\n{err}" if err else "")
+            what = "全平" if rule.action == "close_all" else f"平 {rule.close_pct:g}%"
+            names = "、".join(p.label for p in positions)
+            self.event("trigger", f"{w.coin} 触发规则，正在用追逐委托{what}：{names}", desc)
+            results = await asyncio.gather(*(self._close_one(p, rule) for p in positions))
+            lines = [f"{p.label}：{msg}" for p, (_, msg) in zip(positions, results)]
+            detail = desc + "\n" + "\n".join(lines)
+            if all(ok for ok, _ in results):
+                title = f"已自动{what}：{w.coin}"
                 self.event("close_ok", title, detail)
                 self.alerter.play(SOUND_INFO)
                 self.alerter.dialog(f"仓位哨兵：{title}", detail, critical=False)
                 self._push(f"{title}\n{detail}")
             else:
-                self._raise_alarm(f"close_fail:{p.pos_id}:{int(now)}", f"仓位哨兵：{p.coin} 自动平仓失败，请立刻去 OKX 手动处理",
-                                  f"{desc}\n失败原因：{err}", kind="event")
+                self._raise_alarm(f"close_fail:{w.inst_id}:{int(now)}", f"仓位哨兵：{w.coin} 自动平仓失败，请立刻去 OKX 手动处理",
+                                  detail, kind="event")
         except Exception as e:
             log.exception("execute failed")
-            self._raise_alarm(f"close_fail:{p.pos_id}:{int(now)}", f"仓位哨兵：处理 {p.coin} 时出错，请去 OKX 检查仓位",
+            self._raise_alarm(f"close_fail:{w.inst_id}:{int(now)}", f"仓位哨兵：处理 {w.coin} 时出错，请去 OKX 检查仓位",
                               f"{desc}\n错误：{explain(e)}", kind="event")
         finally:
-            self.in_flight.discard(p.pos_id)
+            self.in_flight.discard(w.inst_id)
             await self._reconcile_positions()
 
-    async def _do_close(self, p: Position, action: str, size: Decimal | None) -> tuple[bool, str | None]:
-        if action == "close_all":
-            return await self._retry(lambda: self.rest.close_position(p.inst_id, p.mgn_mode, p.pos_side))
+    async def _close_one(self, p: Position, rule: Rule) -> tuple[bool, str]:
+        """平一个仓位：算出要平的张数，交给追逐委托（含市价兜底）。"""
+        note = ""
+        size = p.size
+        if rule.action == "close_pct":
+            inst = await self._instrument(p.inst_id)
+            part = partial_size(p.size, rule.close_pct, _dec(inst.get("lotSz")), _dec(inst.get("minSz")))
+            if part is None:
+                note = "按比例算出的张数不够最小下单量（或剩余太少），改为全平；"
+            else:
+                size = part
+        target = p.size - size  # 平完后应剩下的张数，全平就是 0
+        ok, msg = await self._chase_close(p, size, target)
+        return ok, note + msg
+
+    async def _chase_close(self, p: Position, size: Decimal, target: Decimal) -> tuple[bool, str]:
+        cfg = self.cfg
+        side = "sell" if p.side == "long" else "buy"
+        reason = ""
+        algo_id = None
+        t0 = time.monotonic()
+        try:
+            algo_id = await self.rest.place_chase(p.inst_id, p.mgn_mode, side, fmt_size(size), p.pos_side,
+                                                  self.net_mode, cfg.chase_max_pct / 100)
+        except OkxError as e:
+            if e.code in POSITION_GONE:
+                return True, "仓位已不存在（可能已经被平掉了）"
+            reason = f"追逐委托下单失败（{explain(e)}）"
+        except NetworkError as e:
+            reason = f"追逐委托下单失败（{explain(e)}）"
+
+        if algo_id:
+            reason = f"追逐委托 {cfg.chase_timeout_sec:g} 秒内没有全部成交"
+            while time.monotonic() - t0 < cfg.chase_timeout_sec:
+                await asyncio.sleep(self.chase_poll_sec)
+                now_size = await self._position_size(p.pos_id)
+                if now_size is not None and now_size <= target:
+                    return True, f"追逐委托已成交（用时 {time.monotonic() - t0:.0f} 秒）"
+                try:
+                    state = (await self.rest.algo_detail(algo_id)).get("state")
+                except Exception:
+                    state = None
+                if state in CHASE_DONE_STATES:
+                    if state != "effective":
+                        reason = "追逐委托被撤销（价格偏离超过最大追逐距离）"
+                    break
+            try:
+                await self.rest.cancel_algo(p.inst_id, algo_id)
+            except Exception as e:
+                log.info("cancel chase %s: %s", algo_id, e)
+            await asyncio.sleep(self.chase_poll_sec)
+
+        now_size = await self._position_size(p.pos_id)
+        if now_size is None:
+            await asyncio.sleep(1)
+            now_size = await self._position_size(p.pos_id)
+        if now_size is None:
+            return False, f"{reason}，并且查不到当前仓位，无法改市价兜底"
+        if now_size <= target:
+            return True, f"追逐委托已成交（用时 {time.monotonic() - t0:.0f} 秒）"
+        remaining = now_size - target
+        if target <= 0:
+            ok, err = await self._retry(lambda: self.rest.close_position(p.inst_id, p.mgn_mode, p.pos_side))
+        else:
+            ok, err = await self._market_reduce(p, remaining, target)
+        if ok:
+            return True, f"{reason}，已改市价平掉剩余 {fmt_size(remaining)} 张"
+        return False, f"{reason}，改市价也失败了：{err}"
+
+    async def _market_reduce(self, p: Position, amount: Decimal, final_target: Decimal) -> tuple[bool, str | None]:
         inst = await self._instrument(p.inst_id)
         lot = _dec(inst.get("lotSz"))
         side = "sell" if p.side == "long" else "buy"
-        remaining = p.size
-        for chunk in split_size(size, _dec(inst.get("maxMktSz")), lot):
+        remaining = amount + final_target
+        for chunk in split_size(amount, _dec(inst.get("maxMktSz")), lot):
             target = remaining - chunk
 
             async def done(target=target) -> bool:  # 网络超时后先查一下，避免重复平
@@ -530,7 +629,7 @@ class Engine:
                 return True, None
             except OkxError as e:
                 if e.code in POSITION_GONE:
-                    return True, "OKX 返回仓位已不存在（可能已经被平掉了）"
+                    return True, None
                 last = explain(e)
                 if e.is_auth:
                     break
@@ -564,33 +663,28 @@ class Engine:
     def _on_private(self, arg: dict, data: list) -> None:
         if arg.get("channel") != "positions":
             return
-        changed = False
         for d in data:
             if d.get("instType") != "SWAP" or not d.get("instId"):
                 continue
             p = Position.from_okx(d)
             if p.pos == 0:
-                changed |= self._remove_position(p.pos_id)
+                self._remove_position(p.pos_id)
             else:
-                changed |= self._upsert_position(p)
-        if changed:
-            self._spawn_side(self._sync_subscriptions())
+                self._upsert_position(p)
 
-    def _upsert_position(self, p: Position) -> bool:
+    def _upsert_position(self, p: Position) -> None:
         old = self.positions.get(p.pos_id)
         self.positions[p.pos_id] = p
         if old is None and self.first_sync_done:
-            self.event("info", f"发现新仓位：{p.coin} {SIDE_CN[p.side]} {p.size.normalize():f} 张",
-                       "将按" + ("单独规则" if p.inst_id in self.cfg.overrides else "默认规则") + "监控")
-            self._spawn_side(self._refresh_algos())
-        return old is None
+            watched = self.cfg.watch_for(p.inst_id) is not None
+            self.event("info", f"发现新仓位：{p.label}", "在盯盘列表里，按设置监控" if watched else "不在盯盘列表里，不会自动处理")
+            if self._has_loop():
+                self._spawn_side(self._refresh_algos())
 
-    def _remove_position(self, pos_id: str) -> bool:
+    def _remove_position(self, pos_id: str) -> None:
         p = self.positions.pop(pos_id, None)
-        self.evals.pop(pos_id, None)
         if p is not None:
             self.event("info", f"仓位已不在：{p.coin} {SIDE_CN[p.side]}", "已平仓或被减到 0")
-        return p is not None
 
     async def _reconcile_positions(self) -> bool:
         if self.rest is None or not self.creds:
@@ -613,7 +707,7 @@ class Engine:
         if not self.first_sync_done:
             self.positions = fresh
             self.first_sync_done = True
-            names = "、".join(f"{p.coin} {SIDE_CN[p.side]}" for p in fresh.values()) or "无"
+            names = "、".join(p.label for p in fresh.values()) or "无"
             self.event("info", f"读取到 {len(fresh)} 个永续合约仓位", names)
             await self._refresh_algos()
         else:
@@ -621,7 +715,6 @@ class Engine:
                 self._remove_position(pid)
             for p in fresh.values():
                 self._upsert_position(p)
-        await self._sync_subscriptions()
         return True
 
     async def _refresh_algos(self) -> None:
@@ -656,7 +749,7 @@ class Engine:
         now = self.clock()
         stale = self.cfg.stale_sec
         if not self.creds:
-            self._set_status("setup", f"还没填{ENVS[self.cfg.env]} API Key，请打开控制面板设置")
+            self._set_status("setup", "还没填 API Key，请打开控制面板设置")
             return
         if self.priv_ws is not None and self.priv_ws.auth_error and not self.fatal:
             self._set_fatal(self.priv_ws.auth_error)
@@ -681,8 +774,8 @@ class Engine:
         else:
             self._resolve_alarm("conn", "与 OKX 的连接已恢复，继续监控")
 
-        insts = {p.inst_id for p in self.positions.values()}
-        if not problems:
+        insts = {w.inst_id for w in self.cfg.watch if w.enabled}
+        if not problems and self.ready:
             for inst in insts:
                 last = self.last_px.get(inst)
                 since = last[1] if last else self.subscribed.get(inst, now)
@@ -702,9 +795,10 @@ class Engine:
             self._set_status("down", next(a["title"] for a in self.alarms.values() if a["kind"] == "system"))
         elif self.cfg.paused:
             self._set_status("paused", "已暂停：只看不动，不会自动平仓")
+        elif not self.cfg.watch:
+            self._set_status("ok", "已连接 · 还没添加盯盘标的")
         else:
-            n = len(self.positions)
-            self._set_status("ok", f"监控中 · {n} 个仓位" if n else "监控中 · 当前没有仓位")
+            self._set_status("ok", f"监控中 · 盯 {len(insts)} 个标的")
 
     def _set_status(self, status: str, text: str) -> None:
         self.status, self.status_text = status, text
@@ -759,7 +853,7 @@ class Engine:
             self._spawn_side(self._push_async(url, text))
 
     async def _push_async(self, url: str, text: str) -> None:
-        body = {"msg_type": "text", "content": {"text": f"【仓位哨兵·{ENVS[self.cfg.env]}】{text}"}}
+        body = {"msg_type": "text", "content": {"text": f"【仓位哨兵】{text}"}}
         try:
             async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context())) as s:
                 async with s.post(url, json=body, timeout=aiohttp.ClientTimeout(total=8)) as resp:
@@ -780,7 +874,7 @@ class Engine:
                 pass
 
     def event(self, kind: str, title: str, detail: str = "") -> None:
-        e = {"ts": int(self.clock() * 1000), "kind": kind, "title": title, "detail": detail, "env": self.cfg.env}
+        e = {"ts": int(self.clock() * 1000), "kind": kind, "title": title, "detail": detail}
         self.events.append(e)
         log.info("[%s] %s %s", kind, title, detail.replace("\n", " | "))
         try:
@@ -791,27 +885,35 @@ class Engine:
         except OSError:
             pass
 
-    def _rules_summary(self) -> str:
-        cfg = self.cfg
-        if not cfg.all_rules():
-            return "还没有设置规则，目前只监控、不会触发"
-        parts = [("默认：" + "；".join(rule_text(r) for r in cfg.default_rules if r.enabled)) if cfg.default_rules else "默认：无"]
-        for inst, rules in cfg.overrides.items():
-            parts.append(f"{inst.split('-')[0]}：" + ("；".join(rule_text(r) for r in rules if r.enabled) or "不触发"))
+    def watch_summary(self) -> str:
+        if not self.cfg.watch:
+            return "还没有添加盯盘标的，目前什么都不会触发"
+        parts = []
+        for w in self.cfg.watch:
+            rules = "；".join(rule_text(r) for r in w.rules if r.enabled) or "没有规则"
+            parts.append(f"{w.coin}{'' if w.enabled else '（已停用）'}：{gate_text(w)} 时 —— {rules}")
         return "\n".join(parts)
 
     # ------------------------------------------------------------------ 给面板用
+    def _position_view(self, p: Position) -> dict:
+        return {
+            "pos_id": p.pos_id, "inst_id": p.inst_id, "coin": p.coin, "side": p.side,
+            "size": f"{p.size.normalize():f}", "mgn_mode": p.mgn_mode, "lever": p.lever,
+            "avg_px": p.avg_px, "upl": p.upl, "upl_ratio": p.upl_ratio, "liq_px": p.liq_px, "mark_px": p.mark_px,
+            "has_native_sl": p.attached_sl or self.algo_sl.get(p.pos_id, False),
+        }
+
     def snapshot(self) -> dict:
         now = self.clock()
         now_ms = int(now * 1000)
         cfg = self.cfg
-        positions = []
-        for p in sorted(self.positions.values(), key=lambda x: (x.inst_id, x.side)):
-            last = self.last_px.get(p.inst_id)
-            series = self.series.get(p.inst_id)
+        watch = []
+        for w in cfg.watch:
+            last = self.last_px.get(w.inst_id)
+            series = self.series.get(w.inst_id)
             first = series.first_ts() if series is not None else None
             evals = []
-            for ev, cd in self.evals.get(p.pos_id, []):
+            for ev, cd in self.evals.get(w.inst_id, []):
                 evals.append({
                     "rule_id": ev.rule.id, "text": rule_text(ev.rule), "window_min": ev.rule.window_min,
                     "direction": ev.rule.direction, "threshold_pct": ev.rule.threshold_pct,
@@ -821,31 +923,34 @@ class Engine:
                     "cooldown_until": int(cd * 1000) if cd > now else 0,
                     "short_window": first is not None and first > ev.target_ts,
                 })
-            positions.append({
-                "pos_id": p.pos_id, "inst_id": p.inst_id, "coin": p.coin, "side": p.side,
-                "size": f"{p.size.normalize():f}", "mgn_mode": p.mgn_mode, "lever": p.lever,
-                "avg_px": p.avg_px, "upl": p.upl, "upl_ratio": p.upl_ratio, "liq_px": p.liq_px,
-                "mark_px": last[0] if last else None, "price_age": (now - last[1]) if last else None,
+            watch.append({
+                "inst_id": w.inst_id, "coin": w.coin, "enabled": w.enabled,
+                "gate_side": w.gate_side, "gate_px": w.gate_px, "gate_text": gate_text(w),
+                "gate_ok": self.gates.get(w.inst_id), "mark_px": last[0] if last else None,
+                "price_age": (now - last[1]) if last else None,
                 "history_sec": (now_ms - first) / 1000 if first else 0,
-                "has_native_sl": p.attached_sl or self.algo_sl.get(p.pos_id, False),
-                "custom_rules": p.inst_id in cfg.overrides, "rules_count": len(cfg.rules_for(p.inst_id)),
-                "in_flight": p.pos_id in self.in_flight, "evals": evals,
+                "rules_count": sum(1 for r in w.rules if r.enabled), "in_flight": w.inst_id in self.in_flight,
+                "positions": [self._position_view(p) for p in self.positions_on(w.inst_id)], "evals": evals,
             })
+        watched = {w.inst_id for w in cfg.watch}
+        others = [self._position_view(p) for p in sorted(self.positions.values(), key=lambda x: x.inst_id)
+                  if p.inst_id not in watched]
         conn = {}
         for ws, name in ((self.pub_ws, "public"), (self.priv_ws, "private")):
             conn[name] = {"connected": bool(ws and ws.connected), "error": ws.last_error if ws else ""}
         return {
             "version": VERSION, "now": now_ms, "status": self.status, "status_text": self.status_text,
-            "env": cfg.env, "paused": cfg.paused, "ready": self.ready, "fatal": self.fatal,
-            "creds_present": dict(self.creds_present), "checks": list(self.checks.values()),
+            "paused": cfg.paused, "ready": self.ready, "fatal": self.fatal, "has_creds": bool(self.creds),
+            "checks": list(self.checks.values()),
             "alarms": sorted(self.alarms.values(), key=lambda a: a["since"], reverse=True),
-            "sounding": self.alerter.sounding, "positions": positions, "conn": conn,
+            "sounding": self.alerter.sounding, "watch": watch, "others": others, "conn": conn,
             "proxy": {"mode": cfg.proxy_mode, "effective": self.proxy(), "system": proxy_mod.system_proxy()},
             "events": list(self.events)[-200:][::-1],
             "config": {
-                "env": cfg.env, "proxy_mode": cfg.proxy_mode, "proxy_url": cfg.proxy_url,
-                "feishu_webhook": cfg.feishu_webhook, "autostart": cfg.autostart, "paused": cfg.paused,
-                "default_rules": [r.__dict__ for r in cfg.default_rules],
-                "overrides": {k: [r.__dict__ for r in v] for k, v in cfg.overrides.items()},
+                "proxy_mode": cfg.proxy_mode, "proxy_url": cfg.proxy_url, "feishu_webhook": cfg.feishu_webhook,
+                "autostart": cfg.autostart, "paused": cfg.paused,
+                "chase_timeout_sec": cfg.chase_timeout_sec, "chase_max_pct": cfg.chase_max_pct,
+                "watch": [{"inst_id": w.inst_id, "gate_side": w.gate_side, "gate_px": w.gate_px, "enabled": w.enabled,
+                           "rules": [r.__dict__ for r in w.rules]} for w in cfg.watch],
             },
         }

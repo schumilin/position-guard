@@ -135,12 +135,22 @@ details.help > div { padding-bottom: 16px; }
   .ev { grid-template-columns: 1fr; } .ev .detail { grid-column: 1; }
   table.rules th:nth-child(5), table.rules td:nth-child(5) { display: none; }
 }
+
+.gate { display: inline-flex; gap: 6px; align-items: center; font-weight: 600; font-size: 13px; padding: 4px 10px; border-radius: 8px; }
+.gate.ok { background: var(--ok-soft); color: var(--ok); }
+.gate.no { background: var(--soft); color: var(--muted); border: 1px solid var(--line); }
+.posrow { display: flex; gap: 10px 16px; flex-wrap: wrap; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--line); }
+.posrow:last-child { border-bottom: 0; }
+.gate-edit { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 12px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin-top: 10px; }
+.gate-edit input { width: 160px; }
+.gate-edit.missing { border-color: var(--bad); background: var(--bad-soft); }
+.section-title { font-size: 13px; font-weight: 700; color: var(--muted); margin: 14px 0 4px; }
 </style>
 </head>
 <body>
 <header class="top">
   <div class="bar">
-    <div class="brand">🛡️ 仓位哨兵 <span id="envBadge" class="env demo">模拟盘</span></div>
+    <div class="brand">🛡️ 仓位哨兵 <span class="env live">实盘</span></div>
     <span id="statusPill" class="pill starting"><span class="dot"></span><span id="statusText">正在连接…</span></span>
     <span class="spacer"></span>
     <button id="ackBtn" class="btn danger hidden" onclick="ack()">🔕 停止响铃</button>
@@ -148,7 +158,7 @@ details.help > div { padding-bottom: 16px; }
   </div>
   <nav class="tabs" id="tabs">
     <button data-tab="monitor" class="on">监控</button>
-    <button data-tab="rules">规则</button>
+    <button data-tab="watch">盯盘设置</button>
     <button data-tab="log">记录</button>
     <button data-tab="settings">设置</button>
     <button data-tab="help">帮助</button>
@@ -161,10 +171,11 @@ details.help > div { padding-bottom: 16px; }
   <section id="tab-monitor">
     <div id="setupBox"></div>
     <div id="checkBox"></div>
-    <div id="posBox"></div>
+    <div id="watchBox"></div>
+    <div id="othersBox"></div>
   </section>
 
-  <section id="tab-rules" class="hidden"></section>
+  <section id="tab-watch" class="hidden"></section>
 
   <section id="tab-log" class="hidden">
     <div class="card">
@@ -186,43 +197,45 @@ details.help > div { padding-bottom: 16px; }
     <details class="help" open>
       <summary>它在做什么</summary>
       <div>
-        <p>仓位哨兵一直盯着你 OKX 账户里所有的<b>永续合约仓位</b>。每一条规则都在问同一个问题：</p>
-        <div class="callout">「<b>现在的标记价</b>，跟 <b>N 分钟前那一刻的标记价</b> 比，涨跌了多少？」达到你设的百分比，就执行这条规则的动作。</div>
-        <p><b>怎么算的</b>：程序每秒把最新标记价记一个点。比如现在 12:05:20、规则是 3 分钟，那「3 分钟前那一刻」就是 12:02:20，基准价取记录里 12:02:20 那个点（那一秒正好缺了就取 12:02:21 的）。涨跌幅 =（现价 − 基准价）÷ 基准价。窗口随时间一直往前滚动，开仓前的走势也算在内，和杠杆倍数无关。</p>
-        <p><b>方向</b>：「不利」= 多单遇跌、空单遇涨；「有利」= 多单遇涨、空单遇跌。</p>
-        <p><b>动作</b>：市价全平 / 按比例平仓（比如平 50%）/ 只报警（弹窗 + 响铃，不动仓位）。</p>
+        <p>仓位哨兵只盯你在「盯盘设置」里<b>添加的标的</b>，没添加的仓位一概不管。每个标的有两层条件，<b>同时满足</b>才会动手：</p>
+        <ol class="steps">
+          <li><b>价格条件</b>：标记价<b>高于</b>（或<b>低于</b>）你设的某个价格。只在触发那一刻看现价，价格回到另一边，规则就暂时不生效。</li>
+          <li><b>涨跌规则</b>：现在的标记价，跟 <b>N 分钟前那一刻</b>的标记价比，<b>涨</b>（或<b>跌</b>）了 X% 以上。</li>
+        </ol>
+        <p>两层都满足，就执行这条规则的动作：<b>全平 / 按比例平仓 / 只报警</b>。平仓会平掉这个标的上的<b>所有仓位</b>（多单空单都平）。</p>
+        <p><b>「N 分钟前那一刻」怎么取</b>：程序每秒把最新标记价记一个点。比如现在 12:05:20、规则是 3 分钟，那一刻就是 12:02:20，取记录里 12:02:20 那个点（那一秒正好缺了就取 12:02:21）。窗口随时间一直往前滚，开仓前的走势也算在内，和杠杆无关。</p>
+        <p><b>怎么平</b>：先下<b>追逐委托</b>（挂在买一 / 卖一价，每秒跟着价格调整）。如果在设定秒数内没有全部成交，或者价格跑得太远被 OKX 撤单，就撤掉追逐单，把剩下的部分<b>改用市价</b>平掉。秒数和最大追逐距离在「设置」里改。</p>
         <p><b>几个细节</b></p>
         <ul>
-          <li>同一条规则触发后，对这个币同方向的仓位冷却 N 分钟（N 就是这条规则的窗口长度），避免刚平一半马上又把剩下的平掉。冷却期间其他规则照常工作。</li>
-          <li>多条规则同时达到时，只执行最重的那个：全平 &gt; 按比例平 &gt; 只报警。</li>
-          <li>按比例平仓时，按合约最小下单张数向下取整；凑不出合法张数或者剩下的太少，就改为全平。</li>
-          <li>某个币超过 30 秒没收到标记价，就暂停对它的判断并报警，不会拿旧价格乱平。</li>
-          <li>程序刚启动时，会用过去的 1 分钟 K 线收盘价把窗口补满，所以重启后保护马上生效。</li>
+          <li>同一条规则触发后冷却 N 分钟（N 就是它的窗口长度），避免刚平一半又马上把剩下的平掉。其他规则照常工作。</li>
+          <li>多条规则同时达到，只执行最重的那个：全平 &gt; 按比例平 &gt; 只报警。</li>
+          <li>按比例平仓按合约最小下单张数向下取整；凑不出合法张数或剩下太少，就改为全平。</li>
+          <li>标的没有持仓时，平仓规则不会做任何事；「只报警」规则照样会响，可以当价格提醒用。</li>
+          <li>某个标的超过 30 秒没收到标记价，就暂停对它的判断并报警，不会拿旧价格乱平。</li>
+          <li>程序刚启动或刚添加标的时，会用过去的 1 分钟 K 线收盘价补满窗口，保护马上生效。</li>
         </ul>
       </div>
     </details>
     <details class="help">
       <summary>怎么在 OKX 创建 API Key</summary>
       <div>
-        <p><b>先建模拟盘 Key 试用</b>（用的是假钱）：</p>
         <ol class="steps">
-          <li>电脑浏览器打开 <span class="mono">www.okx.com</span> 登录，顶部「交易」→「模拟交易」进入模拟盘。</li>
-          <li>模拟盘里点「个人中心」→「模拟交易 API」→「创建」。</li>
-          <li>权限<b>只勾「读取」和「交易」，不要勾「提现」</b>；IP 地址留空；Passphrase 自己设一串并记住。</li>
-          <li>创建后会显示 API Key、Secret Key。<b>Secret Key 只显示这一次</b>，马上复制到本程序「设置」里保存。</li>
+          <li>OKX 网页或电脑客户端：右上角头像 →「API」→「创建 API Key」。</li>
+          <li>备注名随便写；<b>账户</b>选你平时开合约的那个；用途选「API 交易」。</li>
+          <li>权限：「读取」默认已勾，<b>再只勾「交易」</b>。提现、赚币、借贷、划转都不要勾。</li>
+          <li>IP 白名单<b>保持关闭</b>；设一个密码（Passphrase）并记住。</li>
+          <li>点「提交全部」，输入验证码。页面会显示 API Key 和 Secret Key，<b>Secret Key 只显示一次</b>，马上复制到本程序。</li>
         </ol>
-        <p><b>试用满意后再建实盘 Key</b>：实盘页面右上角头像 →「API」→「创建 API Key」，其余同上。然后在「设置」里切到「实盘」，填实盘 Key。</p>
         <div class="callout warn">
           <b>为什么 IP 留空</b>：你是通过代理上网的，OKX 看到的 IP 是代理节点的，换节点就变。<br>
-          <b>代价</b>：OKX 规定，没绑 IP、带交易权限的 Key 连续 14 天没被使用会被自动删除。本程序开着就一直在用，不会被删；如果程序关了超过 14 天，就需要重建一把。<br>
-          <b>为什么不能勾提现</b>：本程序只需要平仓。万一 Key 泄露，没有提现权限，钱就转不走。勾了提现的 Key，本程序会直接拒绝使用。
+          <b>代价</b>：没绑 IP、带交易权限的 Key 连续 14 天没被使用会被 OKX 自动删除。本程序开着就一直在用，不会被删；程序关了超过 14 天，就需要重建一把。<br>
+          <b>为什么不能勾提现</b>：本程序只需要平仓。万一 Key 泄露，没有提现权限，钱就转不走。勾了提现的 Key，本程序会拒绝使用。
         </div>
       </div>
     </details>
     <details class="help">
       <summary>菜单栏图标是什么意思</summary>
       <div>
-        <p>屏幕右上角菜单栏的「哨兵」图标：</p>
         <ul>
           <li>🟢 正常监控中</li>
           <li>🟡 已暂停：只看不动，不会自动平仓</li>
@@ -230,21 +243,19 @@ details.help > div { padding-bottom: 16px; }
           <li>⚪ 还没填 API Key</li>
           <li>⏳ 正在连接</li>
         </ul>
-        <p>点图标还可以：打开控制面板、暂停 / 恢复自动平仓、停止响铃、退出。</p>
       </div>
     </details>
     <details class="help">
       <summary>遇到报警怎么办</summary>
       <div>
         <ul>
-          <li><b>「自动平仓失败」</b>：程序已自动重试 3 次都没成功。<b>立刻打开 OKX 手动处理</b>这个仓位。</li>
-          <li><b>「与 OKX 的连接中断」</b>：先看代理软件开着没有、节点能不能用。断线期间不会自动平仓。连上后会自动恢复。</li>
-          <li><b>「行情中断」</b>：某个币一直收不到价格，一般跟断线是同一个原因。</li>
-          <li><b>「仓位哨兵已停止工作」</b>：API Key 失效或被删除了。去「设置」重新填一把 Key。</li>
-          <li><b>怀疑程序乱平仓</b>：马上点「暂停自动平仓」（页面右上角，或者菜单栏图标里），然后去「记录」看它为什么触发。</li>
-          <li><b>怀疑 Key 泄露</b>：在 OKX 的 API 管理里把这把 Key 删掉，删掉后立刻失效。</li>
+          <li><b>「自动平仓失败」</b>：追逐委托和市价兜底都没成功。<b>立刻打开 OKX 手动处理</b>。</li>
+          <li><b>「与 OKX 的连接中断」</b>：先看代理软件开着没有、节点能不能用。断线期间不会自动平仓。</li>
+          <li><b>「行情中断」</b>：某个标的一直收不到价格，一般跟断线是同一个原因。</li>
+          <li><b>「仓位哨兵已停止工作」</b>：API Key 失效或被删除了，去「设置」重新填。</li>
+          <li><b>怀疑程序乱平仓</b>：马上点「暂停自动平仓」，然后去「记录」看它为什么触发。</li>
+          <li><b>怀疑 Key 泄露</b>：在 OKX 的 API 管理里删掉这把 Key，立刻失效。</li>
         </ul>
-        <p>报警会弹窗并循环响铃，点弹窗的「知道了」或页面上的「停止响铃」就会停下。</p>
       </div>
     </details>
     <details class="help">
@@ -252,21 +263,21 @@ details.help > div { padding-bottom: 16px; }
       <div>
         <ul>
           <li><b>电脑关机、断电、睡眠、退出登录、代理断开、OKX 接口故障时，它不工作。</b></li>
-          <li>市价平仓会有滑点：行情剧烈时，实际成交价可能比触发时差不少。</li>
+          <li>追逐委托在急涨急跌时可能追不上，这时会改市价兜底；市价单行情剧烈时会有明显滑点。</li>
           <li>它看的是标记价格，和盘口最新成交价会有细微差别。</li>
         </ul>
-        <div class="callout bad"><b>所以每个仓位仍然要在 OKX 上挂原生止损</b>（持仓上的「止盈止损」）。原生止损挂在交易所的服务器上，电脑关机也照样有效；本程序是第二道防线。监控页会标出哪些仓位没挂原生止损。</div>
+        <div class="callout bad"><b>每个仓位仍然要在 OKX 上挂原生止损</b>（持仓上的「止盈止损」）。原生止损挂在交易所服务器上，电脑关机也有效；本程序是第二道防线。</div>
       </div>
     </details>
     <details class="help">
       <summary>这台电脑需要保持什么状态</summary>
       <div>
         <ul>
-          <li>插着电源。程序运行时会自己阻止电脑睡眠；屏幕可以关、可以锁屏。</li>
-          <li><b>不要退出登录</b>账户，也不要合上笔记本盖子（合盖会强制睡眠）。</li>
-          <li>代理软件开着，并且设成开机自启；打开「系统代理」，或者用 TUN / 增强模式。</li>
+          <li>插着电源。程序运行时会自己阻止睡眠；屏幕可以关、可以锁屏。</li>
+          <li><b>不要退出登录</b>，也不要合上笔记本盖子（合盖会强制睡眠）。</li>
+          <li>代理软件开着并设成开机自启，打开「系统代理」，或用 TUN / 增强模式。</li>
           <li>建议关掉 macOS 自动安装更新（系统设置 → 通用 → 软件更新），免得半夜重启。</li>
-          <li>本程序默认开机自动运行（「设置」里可以关）。万一停电重启，要有人登录一次，程序才会运行。</li>
+          <li>本程序默认开机自动运行。停电重启后要有人登录一次，程序才会运行。</li>
         </ul>
       </div>
     </details>
@@ -274,9 +285,9 @@ details.help > div { padding-bottom: 16px; }
 </div>
 
 <div id="saveBar" class="savebar hidden">
-  <span>规则有改动，还没保存</span>
-  <button class="btn" onclick="discardRules()">放弃改动</button>
-  <button class="btn primary" onclick="saveRules()">保存规则</button>
+  <span>盯盘设置有改动，还没保存</span>
+  <button class="btn" onclick="discardWatch()">放弃改动</button>
+  <button class="btn primary" onclick="saveWatch()">保存</button>
 </div>
 <div id="modalRoot"></div>
 <div id="toast"></div>
@@ -291,16 +302,16 @@ const TOKEN = (() => {
 })();
 // 菜单栏再次「打开控制面板」时，浏览器可能复用这个标签页只改 #t=，此时换上新令牌重新加载
 window.addEventListener('hashchange', () => { if (/t=/.test(location.hash)) location.reload(); });
-const ENV = { demo: '模拟盘', live: '实盘' };
-const DIR = { adverse: '不利', favorable: '有利' };
-const ACT = { close_all: '市价全平', close_pct: '按比例平仓', alert: '只报警' };
+const DIR = { up: '涨', down: '跌' };
+const GATE = { above: '高于', below: '低于' };
+const ACT = { close_all: '全平', close_pct: '按比例平仓', alert: '只报警' };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-let S = null;            // 最新状态
+let S = null;
 let tab = 'monitor';
 let logFilter = 'all';
 let draft = null, dirty = false;
-let setupKey = '';
+let setupShown = null;
 
 async function api(path, body) {
   const r = await fetch(path, {
@@ -321,10 +332,10 @@ function modal(title, body, okText, opts = {}) {
   return new Promise((resolve) => {
     const root = $('modalRoot');
     root.innerHTML = `<div class="modal-bg"><div class="modal"><h3>${esc(title)}</h3><div class="body">${opts.html ? body : esc(body)}</div>
-      <div class="btns">${opts.noCancel ? '' : '<button class="btn" id="mCancel">取消</button>'}<button class="btn ${opts.danger ? 'danger' : 'primary'}" id="mOk">${esc(okText || '确定')}</button></div></div></div>`;
+      <div class="btns"><button class="btn" id="mCancel">取消</button><button class="btn ${opts.danger ? 'danger' : 'primary'}" id="mOk">${esc(okText || '确定')}</button></div></div></div>`;
     const done = (v) => { root.innerHTML = ''; resolve(v); };
     $('mOk').onclick = () => done(true);
-    if (!opts.noCancel) $('mCancel').onclick = () => done(false);
+    $('mCancel').onclick = () => done(false);
   });
 }
 const pad = (n) => String(n).padStart(2, '0');
@@ -337,31 +348,20 @@ function px(p) {
 }
 function pct(v, d = 2) { return (v > 0 ? '+' : '') + (+v).toFixed(d) + '%'; }
 function win(m) { m = +m; return m < 1 ? Math.round(m * 60) + ' 秒' : (+m.toFixed(4)) + ' 分钟'; }
-function ruleText(r) {
-  const a = r.action === 'close_pct' ? `平 ${+r.close_pct}%` : ACT[r.action];
-  return `${win(r.window_min)}内${DIR[r.direction]}变动 ≥ ${+r.threshold_pct}% → ${a}`;
-}
-function ruleSentence(r) {
-  const w = parseFloat(r.window_min), t = parseFloat(r.threshold_pct), p = parseFloat(r.close_pct);
-  if (!(w > 0) || !(t > 0)) return '请填完整：时间窗口和涨跌幅都要大于 0';
-  const dir = r.direction === 'adverse' ? '朝对仓位不利的方向（多单跌 / 空单涨）' : '朝对仓位有利的方向（多单涨 / 空单跌）';
-  const act = r.action === 'close_all' ? '<b>市价全平</b>这个仓位' : r.action === 'close_pct' ? `<b>市价平掉 ${p || '?'}%</b>` : '<b>弹窗 + 响铃提醒</b>，不动仓位';
-  return `${r.enabled ? '' : '（已停用）'}和 ${win(w)}前的标记价比，${dir}变动达到 <b>${t}%</b> 时，${act}。`;
-}
+function actText(r) { return r.action === 'close_pct' ? `平 ${+r.close_pct}%` : ACT[r.action]; }
+function ruleText(r) { return `${win(r.window_min)}内${DIR[r.direction]} ≥ ${+r.threshold_pct}% → ${actText(r)}`; }
+function coinOf(inst) { return String(inst).split('-')[0]; }
 
 // ------------------------------------------------------------------ 顶部
 function renderTop() {
   const s = S;
-  $('envBadge').textContent = ENV[s.env];
-  $('envBadge').className = 'env ' + s.env;
   $('statusPill').className = 'pill ' + s.status;
   $('statusText').textContent = s.status_text;
-  const ringing = s.sounding || s.alarms.some((a) => !a.acked);
-  $('ackBtn').classList.toggle('hidden', !ringing);
+  $('ackBtn').classList.toggle('hidden', !(s.sounding || s.alarms.some((a) => !a.acked)));
   const pb = $('pauseBtn');
   pb.textContent = s.paused ? '▶︎ 恢复自动平仓' : '⏸ 暂停自动平仓';
   pb.className = 'btn' + (s.paused ? ' primary' : '');
-  pb.disabled = !s.creds_present[s.env];
+  pb.disabled = !s.has_creds;
   $('alarms').innerHTML = s.alarms.map((a) => `
     <div class="alarm ${a.acked ? 'acked' : ''}">
       <div style="font-size:20px">${a.kind === 'event' ? '⚠️' : '🚨'}</div>
@@ -372,52 +372,41 @@ function renderTop() {
 }
 
 // ------------------------------------------------------------------ 监控页
+function credForm(prefix) {
+  return `
+    <label class="f">API Key<input class="wide mono" type="text" id="${prefix}-k" autocomplete="off" spellcheck="false" placeholder="形如 1a2b3c4d-...."></label>
+    <label class="f">Secret Key<input class="wide mono" type="password" id="${prefix}-s" autocomplete="off" placeholder="创建时只显示一次"></label>
+    <label class="f">Passphrase（密码）<input class="wide mono" type="password" id="${prefix}-p" autocomplete="off" placeholder="创建 Key 时自己设的那串"></label>
+    <div class="row"><button class="btn primary" onclick="saveCreds('${prefix}', this)">保存并验证</button>
+    <span class="sub">会检查 Key 是否有效、权限是否只有「读取 + 交易」，通过后存进这台 Mac 的钥匙串。</span></div>
+    <div id="${prefix}-result"></div>`;
+}
 function renderSetup() {
-  const s = S;
-  const key = s.env + ':' + s.creds_present[s.env];
-  if (key === setupKey) return;
-  setupKey = key;
-  const box = $('setupBox');
-  if (s.creds_present[s.env]) { box.innerHTML = ''; return; }
-  const live = s.env === 'live';
-  box.innerHTML = `
+  if (setupShown === S.has_creds) return;
+  setupShown = S.has_creds;
+  $('setupBox').innerHTML = S.has_creds ? '' : `
     <div class="card">
-      <h2>第一步：填入${ENV[s.env]} API Key</h2>
+      <h2>第一步：填入 OKX API Key</h2>
       <div class="sub">仓位哨兵需要一把 OKX API Key 才能看到你的仓位、在触发时帮你平仓。全程大约 3 分钟。</div>
-      <div class="radio">
-        ${['live', 'demo'].map((e) => `<label class="${s.env === e ? 'on' : ''}"><input type="radio" name="setupEnv" ${s.env === e ? 'checked' : ''} onchange="switchEnv('${e}', true)"><b>${ENV[e]}</b><div class="sub">${e === 'live' ? '真实账户，真钱' : '模拟交易，假钱'}</div></label>`).join('')}
-      </div>
       <ol class="steps">
-        ${live
-          ? '<li>电脑浏览器打开 <span class="mono">www.okx.com</span> 登录，右上角头像 →「API」→「创建 API Key」。</li>'
-          : '<li>电脑浏览器打开 <span class="mono">www.okx.com</span> 登录，顶部「交易」→「模拟交易」进入模拟盘，再点「个人中心」→「模拟交易 API」→「创建」。</li>'}
-        <li>权限<b>只勾「读取」和「交易」，不要勾「提现」</b>；IP 地址<b>留空</b>；Passphrase 自己设一串并记住。</li>
-        <li>创建成功后，把下面三项复制进来。<b>Secret Key 只显示一次</b>，不要关掉那个页面，也不要截图或发给别人。</li>
+        <li>OKX 网页或电脑客户端：右上角头像 →「API」→「创建 API Key」。账户选你开合约的那个，用途选「API 交易」。</li>
+        <li>权限<b>只勾「交易」</b>（「读取」默认已勾），<b>不要勾提现、赚币、借贷、划转</b>；IP 白名单保持关闭；设一个密码并记住。</li>
+        <li>点「提交全部」并验证后，把下面三项复制进来。<b>Secret Key 只显示一次</b>，不要截图或发给别人。</li>
       </ol>
-      ${credForm(s.env, 'setup')}
-      ${live ? '' : '<div class="callout">先用模拟盘（假钱）把规则试顺手，确认没问题再到「设置」里切到实盘。</div>'}
+      ${credForm('setup')}
     </div>`;
 }
-function credForm(env, prefix) {
-  return `
-    <label class="f">API Key<input class="wide mono" type="text" id="${prefix}-${env}-k" autocomplete="off" spellcheck="false" placeholder="形如 1a2b3c4d-....">
-    </label>
-    <label class="f">Secret Key<input class="wide mono" type="password" id="${prefix}-${env}-s" autocomplete="off" placeholder="创建时只显示一次"></label>
-    <label class="f">Passphrase<input class="wide mono" type="password" id="${prefix}-${env}-p" autocomplete="off" placeholder="你创建时自己设的那串"></label>
-    <div class="row"><button class="btn primary" onclick="saveCreds('${env}','${prefix}', this)">保存并验证</button>
-    <span class="sub">会检查 Key 是否有效、权限是否只有「读取 + 交易」，通过后存进这台 Mac 的钥匙串。</span></div>
-    <div id="${prefix}-${env}-result"></div>`;
-}
-async function saveCreds(env, prefix, btn) {
-  const v = (x) => $(`${prefix}-${env}-${x}`).value.trim();
-  const out = $(`${prefix}-${env}-result`);
+async function saveCreds(prefix, btn) {
+  const v = (x) => $(`${prefix}-${x}`).value.trim();
+  const out = $(`${prefix}-result`);
   btn.disabled = true; btn.textContent = '正在验证…'; out.innerHTML = '';
   try {
-    const r = await api('/api/credentials', { env, api_key: v('k'), secret_key: v('s'), passphrase: v('p') });
+    const r = await api('/api/credentials', { api_key: v('k'), secret_key: v('s'), passphrase: v('p') });
     out.innerHTML = checksHtml(r.checks);
-    toast(`${ENV[env]} API Key 已保存`);
-    setupKey = ''; if (tab === 'settings') setTimeout(renderSettings, 300);
+    toast('API Key 已保存');
+    setupShown = null;
     await refresh();
+    if (tab === 'settings') renderSettings();
   } catch (e) {
     out.innerHTML = `<div class="callout bad">${esc(e.message)}</div>` + (e.data && e.data.checks ? checksHtml(e.data.checks) : '');
   } finally { btn.disabled = false; btn.textContent = '保存并验证'; }
@@ -429,163 +418,214 @@ function checksHtml(list) {
 }
 function renderChecks() {
   const s = S;
-  const show = s.creds_present[s.env] && (!s.ready || s.fatal || s.checks.some((c) => c.state !== 'ok'));
+  const show = s.has_creds && (!s.ready || s.fatal || s.checks.some((c) => c.state !== 'ok'));
   $('checkBox').innerHTML = show && s.checks.length ? `<div class="card"><h2>${s.fatal ? '需要处理' : s.ready ? '自检提示' : '正在自检'}</h2>${checksHtml(s.checks)}</div>` : '';
 }
-function renderPositions() {
+function posRow(p) {
+  const upl = +p.upl, ratio = +p.upl_ratio * 100;
+  return `<div class="posrow num">
+    <span class="tag ${p.side}">${p.side === 'long' ? '多单' : '空单'}</span>
+    <span><b>${esc(p.size)}</b> 张</span>
+    <span class="sub">${esc(p.lever)}x · ${p.mgn_mode === 'cross' ? '全仓' : '逐仓'}</span>
+    <span class="sub">均价 ${px(p.avg_px)}</span>
+    <span class="${upl >= 0 ? 'up' : 'down'}">${isNaN(upl) ? '—' : (upl >= 0 ? '+' : '') + upl.toFixed(2)}${isNaN(ratio) ? '' : ` (${pct(ratio)})`}</span>
+    <span class="sub">强平价 ${px(p.liq_px)}</span>
+    <span class="spacer"></span>
+    ${p.has_native_sl ? '<span class="tag okc">✓ 已挂原生止损</span>' : '<span class="tag badc" title="建议在 OKX 上给这个仓位挂止损，电脑关机时它仍然有效">✕ 没挂原生止损</span>'}
+  </div>`;
+}
+function renderWatchCards() {
   const s = S;
-  const box = $('posBox');
-  if (!s.creds_present[s.env]) { box.innerHTML = ''; return; }
-  const noRules = !s.config.default_rules.length && !Object.keys(s.config.overrides).length;
-  let html = '';
-  if (noRules) html += `<div class="card callout warn" style="margin-top:16px"><b>还没有设置任何规则</b>：现在只监控、不会触发。去 <a href="#" onclick="go('rules');return false">「规则」</a> 页添加。</div>`;
-  if (!s.positions.length) {
-    html += `<div class="card empty">${s.ready ? '当前没有永续合约仓位。<br>开仓后会自动出现在这里，并按规则开始监控。' : '正在读取仓位…'}</div>`;
-    box.innerHTML = html; return;
+  if (!s.has_creds) { $('watchBox').innerHTML = ''; return; }
+  if (!s.watch.length) {
+    $('watchBox').innerHTML = `<div class="card empty">还没有添加盯盘标的，现在什么都不会触发。<br><br><button class="btn primary" onclick="go('watch')">去添加盯盘标的</button></div>`;
+    return;
   }
-  for (const p of s.positions) {
-    const upl = +p.upl, ratio = +p.upl_ratio * 100;
-    const stale = p.price_age !== null && p.price_age > 30;
-    html += `<div class="card">
+  $('watchBox').innerHTML = s.watch.map((w) => {
+    const stale = w.price_age !== null && w.price_age > 30;
+    const gate = w.gate_ok === true ? `<span class="gate ok">✓ ${esc(w.gate_text)}：已满足</span>`
+      : w.gate_ok === false ? `<span class="gate no">${esc(w.gate_text)}：暂不满足，规则不生效</span>` : `<span class="gate no">${esc(w.gate_text)}</span>`;
+    return `<div class="card">
       <div class="pos-head">
-        <span class="coin">${esc(p.coin)}</span>
-        <span class="tag ${p.side}">${p.side === 'long' ? '多单' : '空单'}</span>
-        <span class="tag">${esc(p.lever)}x · ${p.mgn_mode === 'cross' ? '全仓' : '逐仓'}</span>
-        <span class="tag">${esc(p.size)} 张</span>
-        ${p.in_flight ? '<span class="tag warnc">正在平仓…</span>' : ''}
-        <span class="spacer"></span>
-        ${p.has_native_sl ? '<span class="tag okc">✓ 已挂原生止损</span>' : '<span class="tag badc" title="建议在 OKX 上给这个仓位挂止损，电脑关机时它仍然有效">✕ 没挂原生止损</span>'}
+        <span class="coin">${esc(w.coin)}</span><span class="sub mono">${esc(w.inst_id)}</span>
+        ${w.enabled ? '' : '<span class="tag warnc">已停用</span>'}
+        ${w.in_flight ? '<span class="tag warnc">正在平仓…</span>' : ''}
+        <span class="spacer"></span>${gate}
       </div>
       <div class="grid num">
-        <div class="kv"><div class="k">标记价${stale ? '（已中断）' : ''}</div><div class="v ${stale ? 'down' : ''}">${px(p.mark_px)}</div></div>
-        <div class="kv"><div class="k">开仓均价</div><div class="v">${px(p.avg_px)}</div></div>
-        <div class="kv"><div class="k">未实现盈亏</div><div class="v ${upl >= 0 ? 'up' : 'down'}">${isNaN(upl) ? '—' : (upl >= 0 ? '+' : '') + upl.toFixed(2)}${isNaN(ratio) ? '' : ` <span class="sub">(${pct(ratio)})</span>`}</div></div>
-        <div class="kv"><div class="k">预估强平价</div><div class="v">${px(p.liq_px)}</div></div>
+        <div class="kv"><div class="k">标记价${stale ? '（已中断）' : ''}</div><div class="v ${stale ? 'down' : ''}">${px(w.mark_px)}</div></div>
+        <div class="kv"><div class="k">价格条件</div><div class="v">${GATE[w.gate_side]} ${px(w.gate_px)}</div></div>
+        <div class="kv"><div class="k">已有价格数据</div><div class="v">${w.history_sec < 60 ? Math.floor(Math.max(w.history_sec, 0)) + ' 秒' : Math.floor(w.history_sec / 60) + ' 分钟'}</div></div>
       </div>
-      <div class="rules-live">
-        <div class="sub">${p.custom_rules ? `使用 <b>${esc(p.coin)} 单独规则</b>` : '使用 <b>默认规则</b>'} · 已有 ${p.history_sec < 60 ? Math.floor(Math.max(p.history_sec, 0)) + ' 秒' : Math.floor(p.history_sec / 60) + ' 分钟'}价格数据</div>
-        ${p.rules_count === 0 ? '<div class="sub" style="padding:8px 0">这个仓位没有生效的规则，只监控、不触发。</div>' : ''}
-        ${p.rules_count > 0 && !p.evals.length ? '<div class="sub" style="padding:8px 0">等待价格数据…</div>' : ''}
-        ${p.evals.map((e) => evalRow(e, s.now)).join('')}
-      </div>
+      <div class="section-title">持仓</div>
+      ${w.positions.length ? w.positions.map(posRow).join('') : '<div class="sub" style="padding:6px 0">当前没有持仓：平仓规则不会做任何事，「只报警」规则照常提醒。</div>'}
+      <div class="section-title">规则</div>
+      ${w.rules_count === 0 ? '<div class="sub" style="padding:6px 0">没有生效的规则。去「盯盘设置」添加。</div>' : ''}
+      ${w.rules_count > 0 && !w.evals.length ? '<div class="sub" style="padding:6px 0">等待价格数据…</div>' : ''}
+      ${w.evals.map((e) => evalRow(e, w)).join('')}
     </div>`;
-  }
-  box.innerHTML = html;
+  }).join('');
 }
-function evalRow(e, now) {
+function evalRow(e, w) {
   const ratio = Math.max(0, Math.min(1, e.move_pct / e.threshold_pct));
   const cls = ratio >= 0.9 ? 'hi' : ratio >= 0.5 ? 'mid' : '';
   let state = `离触发还差 ${Math.max(0, e.threshold_pct - e.move_pct).toFixed(2)}%`;
   if (e.cooldown_until) state = `冷却中，${clock(e.cooldown_until)} 恢复`;
-  else if (e.hit) state = S.paused ? '已达到（暂停中，未执行）' : '已达到';
+  else if (e.hit && w.gate_ok === false) state = '幅度已达到，但价格条件不满足';
+  else if (e.hit && S.paused) state = '已达到（暂停中，未执行）';
+  else if (e.hit && e.action !== 'alert' && !w.positions.length) state = '已达到（没有持仓，不执行）';
+  else if (e.hit) state = '已达到';
+  else if (w.gate_ok === false) state += ' · 价格条件不满足';
   return `<div class="rl">
     <div class="what">${esc(e.text)}</div>
     <div class="calc num">${clock(e.anchor_ts)} 为 ${px(e.anchor_px)} → 现在 <span class="${e.change_pct >= 0 ? 'up' : 'down'}"><b>${pct(e.change_pct)}</b></span>${e.short_window ? '<br><span class="sub">数据还不满一个窗口，从最早的数据算起</span>' : ''}</div>
     <div><div class="meter ${cls}"><i style="width:${(ratio * 100).toFixed(1)}%"></i></div><div class="meter-label">${esc(state)}</div></div>
   </div>`;
 }
+function renderOthers() {
+  const s = S;
+  if (!s.has_creds || !s.others.length) { $('othersBox').innerHTML = ''; return; }
+  const byInst = {};
+  s.others.forEach((p) => (byInst[p.inst_id] = byInst[p.inst_id] || []).push(p));
+  $('othersBox').innerHTML = `<div class="card"><h2>其他持仓</h2><div class="sub">这些仓位不在盯盘列表里，<b>不会被自动处理</b>。要盯哪个就点「盯这个」。</div>
+    ${Object.entries(byInst).map(([inst, ps]) => `
+      <div class="override" style="background:var(--panel)"><div class="oh"><b>${esc(coinOf(inst))}</b><span class="sub mono">${esc(inst)}</span><span class="spacer"></span>
+        <button class="btn small" onclick="watchThis('${esc(inst)}')">盯这个</button></div>${ps.map(posRow).join('')}</div>`).join('')}
+  </div>`;
+}
 
-// ------------------------------------------------------------------ 规则页
+// ------------------------------------------------------------------ 盯盘设置
 function newId() { return Math.random().toString(16).slice(2, 10); }
-function newRule() { return { id: newId(), window_min: 5, direction: 'adverse', threshold_pct: 3, action: 'alert', close_pct: 50, enabled: true }; }
-function loadDraft() {
-  draft = JSON.parse(JSON.stringify({ default_rules: S.config.default_rules, overrides: S.config.overrides }));
-  dirty = false; $('saveBar').classList.add('hidden');
-}
+function newRule() { return { id: newId(), window_min: 5, direction: 'down', threshold_pct: 2, action: 'alert', close_pct: 50, enabled: true }; }
+function loadDraft() { draft = JSON.parse(JSON.stringify(S.config.watch)); dirty = false; $('saveBar').classList.add('hidden'); }
 function markDirty() { dirty = true; $('saveBar').classList.remove('hidden'); }
-function rulesOf(scope) { return scope === '__default' ? draft.default_rules : draft.overrides[scope]; }
-function ruleTable(scope) {
-  const rules = rulesOf(scope);
-  if (!rules.length) return `<div class="sub" style="padding:10px 0">${scope === '__default' ? '还没有默认规则。' : '这个币没有规则：只监控、不会触发。'}</div>
-    <button class="btn small" onclick="addRule('${scope}')">＋ 添加规则</button>`;
-  return `<table class="rules"><thead><tr><th>时间窗口</th><th>方向</th><th>涨跌幅达到</th><th>动作</th><th>平仓比例</th><th>启用</th><th></th></tr></thead><tbody>
-    ${rules.map((r, i) => `
-      <tr class="${r.enabled ? '' : 'off'}">
-        <td><input type="number" min="0.04" max="360" step="any" value="${esc(r.window_min)}" data-s="${scope}" data-i="${i}" data-f="window_min"><span class="unit">分钟</span></td>
-        <td><select data-s="${scope}" data-i="${i}" data-f="direction">${Object.entries(DIR).map(([k, v]) => `<option value="${k}" ${r.direction === k ? 'selected' : ''}>${v}</option>`).join('')}</select></td>
-        <td><input type="number" min="0.01" max="99" step="any" value="${esc(r.threshold_pct)}" data-s="${scope}" data-i="${i}" data-f="threshold_pct"><span class="unit">%</span></td>
-        <td><select data-s="${scope}" data-i="${i}" data-f="action">${Object.entries(ACT).map(([k, v]) => `<option value="${k}" ${r.action === k ? 'selected' : ''}>${v}</option>`).join('')}</select></td>
-        <td>${r.action === 'close_pct' ? `<input type="number" min="1" max="99" step="1" value="${esc(r.close_pct)}" data-s="${scope}" data-i="${i}" data-f="close_pct"><span class="unit">%</span>` : '<span class="sub">—</span>'}</td>
-        <td><input type="checkbox" ${r.enabled ? 'checked' : ''} data-s="${scope}" data-i="${i}" data-f="enabled"></td>
-        <td><button class="btn ghost small" title="删除这条规则" onclick="delRule('${scope}',${i})">删除</button></td>
-      </tr>
-      <tr><td colspan="7" class="preview" id="pv-${scope}-${i}">${ruleSentence(r)}</td></tr>`).join('')}
-  </tbody></table>
-  <div class="row"><button class="btn small" onclick="addRule('${scope}')">＋ 添加规则</button></div>`;
+function curPx(inst) { const w = S.watch.find((x) => x.inst_id === inst); return w ? w.mark_px : null; }
+function ruleSentence(w, r) {
+  const t = parseFloat(r.threshold_pct), m = parseFloat(r.window_min), p = parseFloat(r.close_pct);
+  const g = parseFloat(w.gate_px);
+  if (!(m > 0) || !(t > 0)) return '请填完整：时间窗口和幅度都要大于 0';
+  const gate = g > 0 ? `标记价${GATE[w.gate_side]} <b>${px(g)}</b> 时` : '<span class="req">（先在上面设好价格条件）</span>';
+  const act = r.action === 'close_all' ? `用追逐委托<b>全平</b> ${esc(coinOf(w.inst_id))} 上的所有仓位（多空都平）`
+    : r.action === 'close_pct' ? `用追逐委托<b>平掉 ${p || '?'}%</b>（${esc(coinOf(w.inst_id))} 上每个仓位各平这个比例）` : '<b>弹窗 + 响铃提醒</b>，不动仓位';
+  return `${r.enabled ? '' : '（已停用）'}${gate}，若和 ${win(m)}前相比<b>${DIR[r.direction]}了 ${t}%</b> 以上，就${act}。`;
 }
-function renderRules() {
+function ruleTable(wi) {
+  const w = draft[wi];
+  const rows = w.rules.map((r, i) => `
+    <tr class="${r.enabled ? '' : 'off'}">
+      <td><input type="number" min="0.04" max="360" step="any" value="${esc(r.window_min)}" data-w="${wi}" data-i="${i}" data-f="window_min"><span class="unit">分钟</span></td>
+      <td><select data-w="${wi}" data-i="${i}" data-f="direction">${Object.entries(DIR).map(([k, v]) => `<option value="${k}" ${r.direction === k ? 'selected' : ''}>${v}</option>`).join('')}</select></td>
+      <td><input type="number" min="0.01" max="99" step="any" value="${esc(r.threshold_pct)}" data-w="${wi}" data-i="${i}" data-f="threshold_pct"><span class="unit">%</span></td>
+      <td><select data-w="${wi}" data-i="${i}" data-f="action">${Object.entries(ACT).map(([k, v]) => `<option value="${k}" ${r.action === k ? 'selected' : ''}>${v}</option>`).join('')}</select></td>
+      <td>${r.action === 'close_pct' ? `<input type="number" min="1" max="99" step="1" value="${esc(r.close_pct)}" data-w="${wi}" data-i="${i}" data-f="close_pct"><span class="unit">%</span>` : '<span class="sub">—</span>'}</td>
+      <td><input type="checkbox" ${r.enabled ? 'checked' : ''} data-w="${wi}" data-i="${i}" data-f="enabled"></td>
+      <td><button class="btn ghost small" onclick="delRule(${wi},${i})">删除</button></td>
+    </tr>
+    <tr><td colspan="7" class="preview" id="pv-${wi}-${i}">${ruleSentence(w, r)}</td></tr>`).join('');
+  return (w.rules.length ? `<table class="rules"><thead><tr><th>和多久前比</th><th>方向</th><th>幅度达到</th><th>动作</th><th>平仓比例</th><th>启用</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    : '<div class="sub" style="padding:10px 0">还没有规则。</div>') + `<div class="row"><button class="btn small" onclick="addRule(${wi})">＋ 添加规则</button></div>`;
+}
+function renderWatchEditor() {
   if (!draft) loadDraft();
-  const posInsts = [...new Set(S.positions.map((p) => p.inst_id))].filter((i) => !(i in draft.overrides));
-  const live = S.env === 'live';
-  $('tab-rules').innerHTML = `
+  const watched = new Set(draft.map((w) => w.inst_id));
+  const posInsts = [...new Set([...S.others, ...S.watch.flatMap((w) => w.positions)].map((p) => p.inst_id))].filter((i) => !watched.has(i));
+  $('tab-watch').innerHTML = `
     <div class="card">
-      <h2>默认规则</h2>
-      <div class="sub">所有仓位都用这套规则，以后新开的仓位也自动适用。某个币要特殊处理，就在下面「单独规则」里给它单独设一套。</div>
-      ${live ? '<div class="callout bad"><b>当前是实盘</b>：带「平仓」动作的规则会自动平掉真实仓位。</div>' : ''}
-      <div class="callout"><b>怎么算</b>：现在的标记价和 N 分钟前那一刻的标记价比，看涨跌了多少。「不利」= 多单遇跌、空单遇涨；「有利」反过来。满足任意一条就执行，同时满足多条时只执行最重的那个（全平 &gt; 按比例平 &gt; 只报警）。</div>
-      ${ruleTable('__default')}
+      <h2>盯盘设置</h2>
+      <div class="sub">只有在这里添加的标的才会被监控和自动处理。</div>
+      <div class="callout"><b>每个标的两层条件，同时满足才动手：</b><br>
+        ① <b>价格条件</b>：标记价高于 / 低于你设的价格（只看触发那一刻）；<br>
+        ② <b>涨跌规则</b>：和 N 分钟前那一刻的标记价比，涨 / 跌了 X% 以上。<br>
+        触发后平掉这个标的上的<b>所有仓位</b>（多空都平）：先下追逐委托，${esc(S.config.chase_timeout_sec)} 秒内没全部成交就改市价。</div>
     </div>
+    ${draft.map((w, wi) => {
+      const cp = curPx(w.inst_id); const g = parseFloat(w.gate_px);
+      const ok = cp && g > 0 ? (w.gate_side === 'above' ? cp >= g : cp <= g) : null;
+      return `<div class="card">
+        <div class="pos-head"><span class="coin">${esc(coinOf(w.inst_id))}</span><span class="sub mono">${esc(w.inst_id)}</span>
+          <label class="sub" style="cursor:pointer"><input type="checkbox" ${w.enabled ? 'checked' : ''} data-w="${wi}" data-f="enabled_w"> 启用</label>
+          <span class="spacer"></span><button class="btn ghost small" onclick="delWatch(${wi})">不再盯这个</button></div>
+        <div class="gate-edit ${g > 0 ? '' : 'missing'}">
+          <b>价格条件</b><span>标记价</span>
+          <select data-w="${wi}" data-f="gate_side">${Object.entries(GATE).map(([k, v]) => `<option value="${k}" ${w.gate_side === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
+          <input type="number" step="any" min="0" placeholder="必填，比如 80000" value="${esc(w.gate_px)}" data-w="${wi}" data-f="gate_px">
+          <span>时，下面的规则才生效</span>
+          <span class="sub">· 当前标记价 ${px(cp)}${ok === null ? '' : ok ? '（现在满足）' : '（现在不满足）'}</span>
+        </div>
+        ${ruleTable(wi)}
+      </div>`;
+    }).join('')}
     <div class="card">
-      <h2>单独规则</h2>
-      <div class="sub">设了单独规则的币，<b>不再使用默认规则</b>，只看自己这套。想让某个币完全不触发，给它建一套空的单独规则即可。</div>
-      ${Object.keys(draft.overrides).map((inst) => `
-        <div class="override">
-          <div class="oh"><b>${esc(inst.split('-')[0])}</b><span class="sub mono">${esc(inst)}</span><span class="spacer"></span>
-            <button class="btn ghost small" onclick="delOverride('${esc(inst)}')">删除单独规则（改回用默认）</button></div>
-          ${ruleTable(inst)}
-        </div>`).join('')}
+      <h2>添加盯盘标的</h2>
       <div class="row">
-        <select id="ovSelect">
-          ${posInsts.map((i) => `<option value="${esc(i)}">${esc(i.split('-')[0])}（当前有仓位）</option>`).join('')}
-          <option value="__custom">其他币，手动输入…</option>
+        <select id="addSelect">
+          ${posInsts.map((i) => `<option value="${esc(i)}">${esc(coinOf(i))}（${esc(i)}，当前有持仓）</option>`).join('')}
+          <option value="__custom">其他合约，手动输入…</option>
         </select>
-        <button class="btn small" onclick="addOverride()">＋ 为这个币单独设置</button>
+        <button class="btn primary small" onclick="addWatchFromSelect()">＋ 添加</button>
       </div>
     </div>`;
 }
-function onRuleInput(ev) {
+function onWatchInput(ev) {
   const el = ev.target;
-  if (!el.dataset || !el.dataset.f) return;
-  const r = rulesOf(el.dataset.s)[+el.dataset.i];
+  if (!el.dataset || !el.dataset.f || el.dataset.w === undefined) return;
+  const w = draft[+el.dataset.w];
   const f = el.dataset.f;
+  if (f === 'enabled_w') { w.enabled = el.checked; markDirty(); return; }
+  if (f === 'gate_side' || f === 'gate_px') { w[f] = el.value; markDirty(); if (f === 'gate_side') renderWatchEditor(); else refreshPreviews(+el.dataset.w); return; }
+  const r = w.rules[+el.dataset.i];
   r[f] = el.type === 'checkbox' ? el.checked : el.value;
   markDirty();
-  if (f === 'action' || f === 'enabled') { renderRules(); return; }
-  const pv = $(`pv-${el.dataset.s}-${el.dataset.i}`);
-  if (pv) pv.innerHTML = ruleSentence(r);
+  if (f === 'action' || f === 'enabled') { renderWatchEditor(); return; }
+  const pv = $(`pv-${el.dataset.w}-${el.dataset.i}`);
+  if (pv) pv.innerHTML = ruleSentence(w, r);
 }
-function addRule(scope) {
-  const list = rulesOf(scope);
-  const base = list.length ? { ...list[list.length - 1], id: newId() } : newRule();
-  list.push(base); markDirty(); renderRules();
+function refreshPreviews(wi) {
+  const w = draft[wi];
+  w.rules.forEach((r, i) => { const pv = $(`pv-${wi}-${i}`); if (pv) pv.innerHTML = ruleSentence(w, r); });
+  const box = document.querySelector(`input[data-w="${wi}"][data-f="gate_px"]`);
+  if (box) box.closest('.gate-edit').classList.toggle('missing', !(parseFloat(w.gate_px) > 0));
 }
-function delRule(scope, i) { rulesOf(scope).splice(i, 1); markDirty(); renderRules(); }
-async function addOverride() {
-  let inst = $('ovSelect').value;
+function addRule(wi) {
+  const rules = draft[wi].rules;
+  rules.push(rules.length ? { ...rules[rules.length - 1], id: newId() } : newRule());
+  markDirty(); renderWatchEditor();
+}
+function delRule(wi, i) { draft[wi].rules.splice(i, 1); markDirty(); renderWatchEditor(); }
+function delWatch(wi) { draft.splice(wi, 1); markDirty(); renderWatchEditor(); }
+function addWatch(inst) {
+  if (!draft) loadDraft();
+  if (draft.some((w) => w.inst_id === inst)) { toast(`${coinOf(inst)} 已经在盯盘列表里了`); return; }
+  draft.push({ inst_id: inst, gate_side: 'below', gate_px: '', enabled: true, rules: [newRule()] });
+  markDirty(); renderWatchEditor();
+  setTimeout(() => { const box = document.querySelector(`input[data-w="${draft.length - 1}"][data-f="gate_px"]`); if (box) { box.scrollIntoView({ block: 'center' }); box.focus(); } }, 50);
+}
+function addWatchFromSelect() {
+  let inst = $('addSelect').value;
   if (inst === '__custom') {
-    const coin = (prompt('输入币种，比如 SOL（默认按 USDT 永续，也可以直接输入完整合约名如 SOL-USDC-SWAP）') || '').trim().toUpperCase();
+    const coin = (prompt('输入币种，比如 SOL（默认按 USDT 永续；也可以输入完整合约名，如 SOL-USDC-SWAP）') || '').trim().toUpperCase();
     if (!coin) return;
     inst = coin.includes('-') ? coin : `${coin}-USDT-SWAP`;
     if (!/^[A-Z0-9]+-[A-Z0-9]+-SWAP$/.test(inst)) { toast('合约名不对，应该像 BTC-USDT-SWAP', true); return; }
   }
-  if (draft.overrides[inst]) return;
-  draft.overrides[inst] = draft.default_rules.map((r) => ({ ...r, id: newId() }));
-  markDirty(); renderRules();
+  addWatch(inst);
 }
-function delOverride(inst) { delete draft.overrides[inst]; markDirty(); renderRules(); }
-function discardRules() { loadDraft(); renderRules(); }
-async function saveRules() {
-  const lines = [];
-  const desc = (rs) => rs.filter((r) => r.enabled).map((r) => '  · ' + ruleText(r)).join('\n') || '  · 无（只监控）';
-  lines.push('默认规则：\n' + desc(draft.default_rules));
-  for (const [inst, rs] of Object.entries(draft.overrides)) lines.push(`${inst.split('-')[0]} 单独规则：\n` + desc(rs));
-  const live = S.env === 'live';
-  const ok = await modal(live ? '保存规则（实盘，立即生效）' : '保存规则（立即生效）', lines.join('\n\n'), '确认保存', { danger: live });
+function watchThis(inst) { go('watch'); addWatch(inst); }
+function discardWatch() { loadDraft(); renderWatchEditor(); }
+async function saveWatch() {
+  const missing = draft.filter((w) => !(parseFloat(w.gate_px) > 0)).map((w) => coinOf(w.inst_id));
+  if (missing.length) { toast(`请先给 ${missing.join('、')} 设好价格条件`, true); return; }
+  const lines = draft.map((w) => {
+    const rules = w.rules.filter((r) => r.enabled).map((r) => '    · ' + ruleText(r)).join('\n') || '    · 没有规则';
+    return `${coinOf(w.inst_id)}${w.enabled ? '' : '（已停用）'}：标记价${GATE[w.gate_side]} ${px(w.gate_px)} 时\n${rules}`;
+  });
+  const ok = await modal('保存盯盘设置（实盘，立即生效）', (lines.join('\n\n') || '盯盘列表为空：什么都不会触发') +
+    '\n\n平仓会平掉对应标的上的所有仓位（多空都平）。', '确认保存', { danger: true });
   if (!ok) return;
   try {
-    S = await api('/api/rules', draft);
-    loadDraft(); renderRules(); renderAll();
-    toast('规则已保存，立即生效');
+    S = await api('/api/watch', { watch: draft });
+    loadDraft(); renderWatchEditor(); renderAll();
+    toast('已保存，立即生效');
   } catch (e) { toast(e.message, true); }
 }
 
@@ -596,7 +636,7 @@ function renderLog() {
   const list = S.events.filter((e) => logFilter === 'all' || LOGF[logFilter].includes(e.kind));
   $('logList').innerHTML = list.length ? list.map((e) => `
     <div class="ev ${e.kind}">
-      <div class="time num">${stamp(e.ts)}${e.env && e.env !== S.env ? `<br><span class="tag">${ENV[e.env]}</span>` : ''}</div>
+      <div class="time num">${stamp(e.ts)}</div>
       <div class="title">${icon[e.kind] || '·'} ${esc(e.title)}</div>
       ${e.detail ? `<div class="detail">${esc(e.detail)}</div>` : ''}
     </div>`).join('') : '<div class="empty">暂无记录</div>';
@@ -605,26 +645,24 @@ function renderLog() {
 // ------------------------------------------------------------------ 设置页
 function renderSettings() {
   const s = S, c = s.config;
-  const credBlock = (env) => `
-    <div class="override" style="background:var(--panel)">
-      <div class="oh"><b>${ENV[env]} API Key</b>
-        ${s.creds_present[env] ? '<span class="tag okc">已保存</span>' : '<span class="tag">未设置</span>'}
-        <span class="spacer"></span>
-        ${s.creds_present[env] ? `<button class="btn ghost small" onclick="delCreds('${env}')">从本机删除</button>` : ''}</div>
-      <details ${s.creds_present[env] ? '' : 'open'}><summary class="sub" style="cursor:pointer;margin-top:6px">${s.creds_present[env] ? '更换这把 Key' : '填写'}</summary>${credForm(env, 'set')}</details>
-    </div>`;
   $('tab-settings').innerHTML = `
     <div class="card">
-      <h2>运行环境</h2>
-      <div class="sub">模拟盘用假钱，适合先把规则试顺手；实盘会对真实仓位自动平仓。两边的 API Key 是分开的。</div>
-      <div class="radio">
-        ${['demo', 'live'].map((e) => `<label class="${c.env === e ? 'on' : ''}"><input type="radio" name="env" value="${e}" ${c.env === e ? 'checked' : ''} onchange="switchEnv('${e}')"><b>${ENV[e]}</b><div class="sub">${s.creds_present[e] ? 'Key 已保存' : '还没填 Key'}</div></label>`).join('')}
-      </div>
+      <h2>API Key ${s.has_creds ? '<span class="tag okc">已保存</span>' : '<span class="tag">未设置</span>'}</h2>
+      <div class="sub">保存在这台 Mac 的钥匙串里，不会发给任何人。权限必须是「读取 + 交易」，带「提现」权限的 Key 会被拒绝。怎么创建见「帮助」页。</div>
+      <details ${s.has_creds ? '' : 'open'}><summary class="sub" style="cursor:pointer;margin-top:8px">${s.has_creds ? '更换 Key' : '填写'}</summary>${credForm('set')}</details>
+      ${s.has_creds ? '<div class="row"><button class="btn ghost small" onclick="delCreds()">从本机删除这把 Key</button></div>' : ''}
     </div>
     <div class="card">
-      <h2>API Key</h2>
-      <div class="sub">保存在这台 Mac 的钥匙串里，不会发给任何人。权限必须是「读取 + 交易」，带「提现」权限的 Key 会被拒绝。怎么创建见「帮助」页。</div>
-      ${credBlock('demo')}${credBlock('live')}
+      <h2>平仓方式</h2>
+      <div class="sub">触发后先下<b>追逐委托</b>：挂在买一 / 卖一价，每秒跟着价格调整。没在规定时间内全部成交，或者价格跑出最大追逐距离被 OKX 撤单，就撤掉追逐单，把剩下的部分改市价平。</div>
+      <div class="row">
+        <label>追逐 <input type="number" id="chaseTimeout" min="3" max="600" step="1" value="${esc(c.chase_timeout_sec)}" style="width:90px"> 秒没全部成交就改市价</label>
+      </div>
+      <div class="row">
+        <label>最大追逐距离 <input type="number" id="chaseMax" min="0.05" max="20" step="0.05" value="${esc(c.chase_max_pct)}" style="width:90px"> %</label>
+        <span class="sub">价格偏离首次挂单价超过这个比例，OKX 会撤掉追逐单（随后立即改市价）</span>
+      </div>
+      <div class="row"><button class="btn primary" onclick="saveChase(this)">保存</button></div>
     </div>
     <div class="card">
       <h2>网络代理</h2>
@@ -654,38 +692,26 @@ function renderSettings() {
     document.querySelectorAll('input[name=pm]').forEach((x) => x.parentElement.classList.toggle('on', x.checked));
   }));
 }
-async function switchEnv(env, quiet) {
-  if (env === S.env) return;
-  if (env === 'live' && !quiet) {
-    const ok = await modal('切换到实盘？', '切到实盘后，规则会对真实仓位自动平仓。\n\n建议：第一天先把所有规则的动作都设成「只报警」，观察触发频率是否符合预期，再改成平仓。', '切换到实盘', { danger: true });
-    if (!ok) { renderSettings(); return; }
-  }
-  try { S = await api('/api/settings', { env }); setupKey = ''; renderAll(); renderSettings(); toast(`已切换到${ENV[env]}`); }
-  catch (e) { toast(e.message, true); renderSettings(); }
+async function postSettings(body, btn, okMsg) {
+  if (btn) btn.disabled = true;
+  try { S = await api('/api/settings', body); toast(okMsg); return true; }
+  catch (e) { toast(e.message, true); return false; } finally { if (btn) btn.disabled = false; }
 }
+async function saveChase(btn) { if (await postSettings({ chase_timeout_sec: $('chaseTimeout').value, chase_max_pct: $('chaseMax').value }, btn, '平仓方式已保存')) renderSettings(); }
 async function saveProxy(btn) {
   const mode = document.querySelector('input[name=pm]:checked').value;
-  btn.disabled = true;
-  try { S = await api('/api/settings', { proxy_mode: mode, proxy_url: $('proxyUrl').value.trim() }); renderSettings(); toast('已保存，正在重新连接'); }
-  catch (e) { toast(e.message, true); } finally { btn.disabled = false; }
+  if (await postSettings({ proxy_mode: mode, proxy_url: $('proxyUrl').value.trim() }, btn, '已保存，正在重新连接')) renderSettings();
 }
-async function saveFeishu(btn) {
-  btn.disabled = true;
-  try { S = await api('/api/settings', { feishu_webhook: $('feishu').value.trim() }); toast('已保存'); }
-  catch (e) { toast(e.message, true); } finally { btn.disabled = false; }
-}
-async function saveAutostart(el) {
-  try { S = await api('/api/settings', { autostart: el.checked }); toast(el.checked ? '已开启开机自启' : '已关闭开机自启'); }
-  catch (e) { toast(e.message, true); }
-}
+async function saveFeishu(btn) { await postSettings({ feishu_webhook: $('feishu').value.trim() }, btn, '已保存'); }
+async function saveAutostart(el) { await postSettings({ autostart: el.checked }, null, el.checked ? '已开启开机自启' : '已关闭开机自启'); }
 async function testAlert(btn) {
   btn.disabled = true;
   try { await api('/api/test-alert', {}); toast('已发送测试报警'); } catch (e) { toast(e.message, true); } finally { btn.disabled = false; }
 }
-async function delCreds(env) {
-  const ok = await modal(`删除本机保存的${ENV[env]} Key？`, '只是从这台 Mac 上删掉，OKX 上的 Key 不受影响。删除后程序将无法监控这个环境，直到重新填写。\n\n如果怀疑 Key 泄露，请同时去 OKX 的 API 管理里删除它。', '删除', { danger: true });
+async function delCreds() {
+  const ok = await modal('从本机删除 API Key？', '只是从这台 Mac 上删掉，OKX 上的 Key 不受影响。删除后程序无法监控，直到重新填写。\n\n如果怀疑 Key 泄露，请同时去 OKX 的 API 管理里删除它。', '删除', { danger: true });
   if (!ok) return;
-  try { S = await api('/api/credentials/delete', { env }); setupKey = ''; renderAll(); renderSettings(); toast('已删除'); }
+  try { S = await api('/api/credentials/delete', {}); setupShown = null; renderAll(); renderSettings(); toast('已删除'); }
   catch (e) { toast(e.message, true); }
 }
 
@@ -693,28 +719,26 @@ async function delCreds(env) {
 async function ack() { try { S = await api('/api/ack', {}); renderAll(); } catch (e) { toast(e.message, true); } }
 async function togglePause() {
   const to = !S.paused;
-  if (to) {
-    const ok = await modal('暂停自动平仓？', '暂停后仍然会监控和显示，但规则达到时不会平仓，也不会响铃。记得之后恢复。', '暂停');
-    if (!ok) return;
-  }
+  if (to && !(await modal('暂停自动平仓？', '暂停后仍然会监控和显示，但规则达到时不会平仓，也不会响铃。记得之后恢复。', '暂停'))) return;
   try { S = await api('/api/pause', { paused: to }); renderAll(); toast(to ? '已暂停自动平仓' : '已恢复自动平仓'); }
   catch (e) { toast(e.message, true); }
 }
 function go(t) {
   tab = t;
   document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === t));
-  ['monitor', 'rules', 'log', 'settings', 'help'].forEach((x) => $('tab-' + x).classList.toggle('hidden', x !== t));
+  ['monitor', 'watch', 'log', 'settings', 'help'].forEach((x) => $('tab-' + x).classList.toggle('hidden', x !== t));
   if (!S) return;
-  if (t === 'rules') renderRules();
+  if (t === 'watch') renderWatchEditor();
   if (t === 'settings') renderSettings();
   if (t === 'log') renderLog();
+  if (t === 'monitor') renderAll();
 }
 function renderAll() {
   if (!S) return;
   renderTop();
-  if (tab === 'monitor') { renderSetup(); renderChecks(); renderPositions(); }
+  if (tab === 'monitor') { renderSetup(); renderChecks(); renderWatchCards(); renderOthers(); }
   if (tab === 'log') renderLog();
-  if (tab === 'rules' && !dirty && !document.activeElement.closest('#tab-rules')) { loadDraft(); renderRules(); }
+  if (tab === 'watch' && !dirty && !document.activeElement.closest('#tab-watch')) { loadDraft(); renderWatchEditor(); }
 }
 let failCount = 0;
 async function refresh() {
@@ -736,8 +760,8 @@ document.getElementById('logChips').addEventListener('click', (e) => {
   document.querySelectorAll('#logChips .chip').forEach((x) => x.classList.toggle('on', x === b));
   renderLog();
 });
-document.getElementById('tab-rules').addEventListener('input', onRuleInput);
-document.getElementById('tab-rules').addEventListener('change', (e) => { if (e.target.tagName === 'SELECT' || e.target.type === 'checkbox') onRuleInput(e); });
+document.getElementById('tab-watch').addEventListener('input', onWatchInput);
+document.getElementById('tab-watch').addEventListener('change', (e) => { if (e.target.tagName === 'SELECT' || e.target.type === 'checkbox') onWatchInput(e); });
 window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
 refresh();
 setInterval(refresh, 1000);

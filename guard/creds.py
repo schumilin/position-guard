@@ -1,4 +1,7 @@
-"""API Key 存取：存在 macOS 钥匙串里，钥匙串不可用时退回到只有本人可读的文件。"""
+"""API Key 存取：存在 macOS 钥匙串里，钥匙串不可用时退回到只有本人可读的文件。
+
+只支持实盘。钥匙串条目名沿用 v0.1 的 okx-live，升级后已保存的 Key 继续可用。
+"""
 from __future__ import annotations
 
 import json
@@ -9,6 +12,7 @@ from .paths import data_dir
 
 log = logging.getLogger(__name__)
 SERVICE = "PositionGuard"
+ACCOUNT = "okx-live"
 FIELDS = ("api_key", "secret_key", "passphrase")
 
 
@@ -21,18 +25,15 @@ def _keyring():
         return None
 
 
-def _file(env: str):
-    return data_dir() / f"cred-{env}.json"
+def _file():
+    return data_dir() / "cred-live.json"
 
 
-def _dev_file(env: str) -> dict | None:
-    """开发测试用：PG_CRED_FILE 指向一个 KEY=VALUE 文件（只对模拟盘生效）。"""
-    path = os.environ.get("PG_CRED_FILE")
-    if not path or env != "demo":
-        return None
+def _dev_file() -> dict | None:
+    """开发测试用：PG_CRED_FILE 指向一个 KEY=VALUE 文件。"""
     vals = {}
     try:
-        for line in open(path, encoding="utf-8"):
+        for line in open(os.environ["PG_CRED_FILE"], encoding="utf-8"):
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
@@ -44,18 +45,18 @@ def _dev_file(env: str) -> dict | None:
     return d if all(d.values()) else None
 
 
-def load(env: str) -> dict | None:
+def load() -> dict | None:
     if os.environ.get("PG_CRED_FILE"):
-        return _dev_file(env)
+        return _dev_file()
     raw = None
     kr = _keyring()
     if kr is not None:
         try:
-            raw = kr.get_password(SERVICE, f"okx-{env}")
+            raw = kr.get_password(SERVICE, ACCOUNT)
         except Exception as e:
             log.warning("keychain read failed: %s", e)
-    if raw is None and _file(env).exists():
-        raw = _file(env).read_text("utf-8")
+    if raw is None and _file().exists():
+        raw = _file().read_text("utf-8")
     if not raw:
         return None
     try:
@@ -65,7 +66,7 @@ def load(env: str) -> dict | None:
     return d if all(d.get(k) for k in FIELDS) else None
 
 
-def save(env: str, api_key: str, secret_key: str, passphrase: str) -> str:
+def save(api_key: str, secret_key: str, passphrase: str) -> str:
     d = {"api_key": api_key.strip(), "secret_key": secret_key.strip(), "passphrase": passphrase.strip()}
     if not all(d.values()):
         raise ValueError("API Key、Secret Key、Passphrase 三项都要填")
@@ -75,24 +76,24 @@ def save(env: str, api_key: str, secret_key: str, passphrase: str) -> str:
     kr = _keyring()
     if kr is not None:
         try:
-            kr.set_password(SERVICE, f"okx-{env}", raw)
-            if _file(env).exists():
-                _file(env).unlink()
+            kr.set_password(SERVICE, ACCOUNT, raw)
+            if _file().exists():
+                _file().unlink()
             return "keychain"
         except Exception as e:
             log.warning("keychain write failed, fallback to file: %s", e)
-    path = _file(env)
+    path = _file()
     path.write_text(raw, "utf-8")
     os.chmod(path, 0o600)
     return "file"
 
 
-def delete(env: str) -> None:
+def delete() -> None:
     kr = _keyring()
     if kr is not None:
         try:
-            kr.delete_password(SERVICE, f"okx-{env}")
+            kr.delete_password(SERVICE, ACCOUNT)
         except Exception:
             pass
-    if _file(env).exists():
-        _file(env).unlink()
+    if _file().exists():
+        _file().unlink()

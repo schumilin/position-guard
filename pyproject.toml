@@ -1,6 +1,6 @@
 [project]
 name = "position-guard"
-version = "0.1.0"
+version = "0.2.0"
 description = "仓位哨兵：OKX 永续合约 N 分钟涨跌幅自动平仓"
 requires-python = ">=3.12,<3.13"
 dependencies = [
