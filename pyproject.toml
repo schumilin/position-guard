@@ -1,0 +1,18 @@
+[project]
+name = "position-guard"
+version = "0.1.0"
+description = "仓位哨兵：OKX 永续合约 N 分钟涨跌幅自动平仓"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "aiohttp>=3.9",
+    "certifi",
+    "keyring>=25",
+    "rumps>=0.4",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "pyinstaller>=6.10"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

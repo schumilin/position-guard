@@ -1,0 +1,746 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>仓位哨兵</title>
+<style>
+:root {
+  --bg: #f3f4f6; --panel: #ffffff; --soft: #f7f8fa; --line: #e3e6eb; --text: #14161b; --muted: #687080;
+  --accent: #2c56e0; --accent-soft: #e9eefd;
+  --ok: #15803d; --ok-soft: #e6f5ec; --warn: #b45309; --warn-soft: #fcf1df; --bad: #c42b2b; --bad-soft: #fcebeb;
+  --radius: 12px; --shadow: 0 1px 2px rgba(16, 24, 40, .05);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1014; --panel: #171a20; --soft: #1d2028; --line: #2a2e38; --text: #e9ebf0; --muted: #98a0ae;
+    --accent: #7b9bff; --accent-soft: #1f2a4a;
+    --ok: #4ade80; --ok-soft: #12291c; --warn: #f5b04a; --warn-soft: #2e2311; --bad: #ff7676; --bad-soft: #341616;
+    --shadow: none;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body { font: 14px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif; -webkit-font-smoothing: antialiased; }
+.num { font-variant-numeric: tabular-nums; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 20px 80px; }
+header.top { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+header .bar { max-width: 1040px; margin: 0 auto; padding: 12px 20px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.brand { font-weight: 700; font-size: 16px; display: flex; align-items: center; gap: 8px; }
+.env { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+.env.demo { background: var(--warn-soft); color: var(--warn); }
+.env.live { background: var(--bad); color: #fff; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 999px; font-weight: 600; font-size: 13px; background: var(--soft); border: 1px solid var(--line); }
+.pill.ok { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
+.pill.paused, .pill.starting, .pill.setup { color: var(--warn); background: var(--warn-soft); border-color: transparent; }
+.pill.down, .pill.error { color: var(--bad); background: var(--bad-soft); border-color: transparent; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.pill.ok .dot { animation: pulse 2s infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+.spacer { flex: 1; }
+.btn { appearance: none; border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 7px 14px; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--muted); padding: 7px 8px; }
+.btn.small { padding: 4px 10px; font-size: 13px; }
+.btn:disabled { opacity: .5; cursor: default; }
+.hidden { display: none !important; }
+nav.tabs { max-width: 1040px; margin: 0 auto; padding: 0 20px; display: flex; gap: 4px; }
+nav.tabs button { appearance: none; border: 0; background: none; font: inherit; color: var(--muted); padding: 10px 12px; cursor: pointer; border-bottom: 2px solid transparent; font-weight: 600; }
+nav.tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+.alarm { margin: 16px 0 0; padding: 14px 16px; border-radius: var(--radius); background: var(--bad-soft); border: 1px solid color-mix(in srgb, var(--bad) 35%, transparent); display: flex; gap: 12px; align-items: flex-start; }
+.alarm.acked { opacity: .75; }
+.alarm .t { font-weight: 700; color: var(--bad); }
+.alarm .m { white-space: pre-wrap; margin-top: 2px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; margin-top: 16px; box-shadow: var(--shadow); }
+.card h2 { font-size: 16px; margin: 0 0 4px; }
+.card h3 { font-size: 14px; margin: 16px 0 6px; }
+.sub { color: var(--muted); font-size: 13px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px 18px; margin-top: 12px; }
+.kv .k { color: var(--muted); font-size: 12px; }
+.kv .v { font-weight: 600; font-size: 15px; }
+.pos-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.coin { font-size: 20px; font-weight: 800; letter-spacing: .3px; }
+.tag { font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 6px; background: var(--soft); color: var(--muted); }
+.tag.long { background: var(--ok-soft); color: var(--ok); }
+.tag.short { background: var(--bad-soft); color: var(--bad); }
+.tag.okc { background: var(--ok-soft); color: var(--ok); }
+.tag.warnc { background: var(--warn-soft); color: var(--warn); }
+.tag.badc { background: var(--bad-soft); color: var(--bad); }
+.up { color: var(--ok); } .down { color: var(--bad); }
+.rules-live { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
+.rl { display: grid; grid-template-columns: minmax(200px, 1.4fr) minmax(220px, 1.6fr) 150px; gap: 6px 16px; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--line); }
+.rl:last-child { border-bottom: 0; }
+.rl .what { font-weight: 600; }
+.rl .calc { color: var(--muted); font-size: 13px; }
+.meter { height: 8px; background: var(--soft); border-radius: 999px; overflow: hidden; border: 1px solid var(--line); }
+.meter > i { display: block; height: 100%; background: var(--ok); border-radius: 999px; transition: width .4s; }
+.meter.mid > i { background: var(--warn); } .meter.hi > i { background: var(--bad); }
+.meter-label { font-size: 12px; color: var(--muted); margin-top: 3px; }
+.checks { margin: 8px 0 0; padding: 0; list-style: none; }
+.checks li { padding: 6px 0; display: flex; gap: 10px; }
+.checks .ic { width: 20px; text-align: center; font-weight: 800; }
+.ic.ok { color: var(--ok); } .ic.warn { color: var(--warn); } .ic.fail { color: var(--bad); }
+.empty { text-align: center; color: var(--muted); padding: 34px 10px; }
+.steps { counter-reset: s; margin: 10px 0 0; padding: 0; list-style: none; }
+.steps > li { counter-increment: s; position: relative; padding: 4px 0 10px 34px; }
+.steps > li::before { content: counter(s); position: absolute; left: 0; top: 3px; width: 22px; height: 22px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-weight: 800; font-size: 12px; display: grid; place-items: center; }
+.callout { padding: 12px 14px; border-radius: 10px; background: var(--soft); border: 1px solid var(--line); margin-top: 12px; }
+.callout.warn { background: var(--warn-soft); border-color: transparent; }
+.callout.bad { background: var(--bad-soft); border-color: transparent; }
+label.f { display: block; margin-top: 12px; font-weight: 600; font-size: 13px; }
+input[type=text], input[type=password], input[type=number], select { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; }
+input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+input.wide { width: 100%; margin-top: 4px; }
+table.rules { width: 100%; border-collapse: collapse; margin-top: 10px; }
+table.rules th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 600; padding: 6px 6px; border-bottom: 1px solid var(--line); }
+table.rules td { padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+table.rules input[type=number] { width: 84px; }
+table.rules tr.off td:not(:last-child) { opacity: .45; }
+.unit { color: var(--muted); margin-left: 4px; }
+.preview { font-size: 12.5px; color: var(--muted); padding: 0 6px 10px; border-bottom: 1px solid var(--line); }
+.override { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-top: 12px; background: var(--soft); }
+.override .oh { display: flex; align-items: center; gap: 10px; }
+.savebar { position: fixed; left: 0; right: 0; bottom: 0; background: var(--panel); border-top: 1px solid var(--line); padding: 12px 20px; display: flex; justify-content: center; gap: 12px; align-items: center; z-index: 20; box-shadow: 0 -4px 18px rgba(0,0,0,.06); }
+.ev { display: grid; grid-template-columns: 128px 1fr; gap: 4px 14px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.ev .time { color: var(--muted); font-size: 12.5px; }
+.ev .title { font-weight: 600; }
+.ev .detail { grid-column: 2; white-space: pre-wrap; color: var(--muted); font-size: 13px; }
+.ev.trigger .title, .ev.close_ok .title { color: var(--accent); }
+.ev.alarm .title { color: var(--bad); }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.chip { border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 3px 12px; font: inherit; font-size: 13px; cursor: pointer; color: var(--muted); }
+.chip.on { background: var(--text); color: var(--panel); border-color: var(--text); }
+.radio { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.radio label { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; cursor: pointer; min-width: 180px; background: var(--panel); }
+.radio label.on { border-color: var(--accent); background: var(--accent-soft); }
+.radio input { margin-right: 6px; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+details.help { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); margin-top: 12px; padding: 0 20px; }
+details.help summary { cursor: pointer; padding: 14px 0; font-weight: 700; }
+details.help[open] summary { border-bottom: 1px solid var(--line); margin-bottom: 8px; }
+details.help > div { padding-bottom: 16px; }
+.modal-bg { position: fixed; inset: 0; background: rgba(10, 12, 16, .45); display: grid; place-items: center; z-index: 50; padding: 20px; }
+.modal { background: var(--panel); border-radius: 14px; max-width: 560px; width: 100%; padding: 22px; border: 1px solid var(--line); }
+.modal h3 { margin: 0 0 8px; font-size: 17px; }
+.modal .body { white-space: pre-wrap; }
+.modal .btns { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+#toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--panel); padding: 10px 18px; border-radius: 10px; font-weight: 600; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 60; max-width: 90vw; }
+#toast.show { opacity: 1; }
+#toast.err { background: var(--bad); color: #fff; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+@media (max-width: 720px) {
+  .rl { grid-template-columns: 1fr; }
+  .ev { grid-template-columns: 1fr; } .ev .detail { grid-column: 1; }
+  table.rules th:nth-child(5), table.rules td:nth-child(5) { display: none; }
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="bar">
+    <div class="brand">🛡️ 仓位哨兵 <span id="envBadge" class="env demo">模拟盘</span></div>
+    <span id="statusPill" class="pill starting"><span class="dot"></span><span id="statusText">正在连接…</span></span>
+    <span class="spacer"></span>
+    <button id="ackBtn" class="btn danger hidden" onclick="ack()">🔕 停止响铃</button>
+    <button id="pauseBtn" class="btn" onclick="togglePause()">暂停自动平仓</button>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button data-tab="monitor" class="on">监控</button>
+    <button data-tab="rules">规则</button>
+    <button data-tab="log">记录</button>
+    <button data-tab="settings">设置</button>
+    <button data-tab="help">帮助</button>
+  </nav>
+</header>
+
+<div class="wrap">
+  <div id="alarms"></div>
+
+  <section id="tab-monitor">
+    <div id="setupBox"></div>
+    <div id="checkBox"></div>
+    <div id="posBox"></div>
+  </section>
+
+  <section id="tab-rules" class="hidden"></section>
+
+  <section id="tab-log" class="hidden">
+    <div class="card">
+      <h2>记录</h2>
+      <div class="sub">最近 200 条。触发、平仓、报警、设置改动都会记在这里。</div>
+      <div class="chips" id="logChips">
+        <button class="chip on" data-f="all">全部</button>
+        <button class="chip" data-f="trade">触发与平仓</button>
+        <button class="chip" data-f="alarm">报警</button>
+        <button class="chip" data-f="sys">系统与设置</button>
+      </div>
+      <div id="logList"></div>
+    </div>
+  </section>
+
+  <section id="tab-settings" class="hidden"></section>
+
+  <section id="tab-help" class="hidden">
+    <details class="help" open>
+      <summary>它在做什么</summary>
+      <div>
+        <p>仓位哨兵一直盯着你 OKX 账户里所有的<b>永续合约仓位</b>。每一条规则都在问同一个问题：</p>
+        <div class="callout">「<b>现在的标记价</b>，跟 <b>N 分钟前那一刻的标记价</b> 比，涨跌了多少？」达到你设的百分比，就执行这条规则的动作。</div>
+        <p><b>怎么算的</b>：程序每秒把最新标记价记一个点。比如现在 12:05:20、规则是 3 分钟，那「3 分钟前那一刻」就是 12:02:20，基准价取记录里 12:02:20 那个点（那一秒正好缺了就取 12:02:21 的）。涨跌幅 =（现价 − 基准价）÷ 基准价。窗口随时间一直往前滚动，开仓前的走势也算在内，和杠杆倍数无关。</p>
+        <p><b>方向</b>：「不利」= 多单遇跌、空单遇涨；「有利」= 多单遇涨、空单遇跌。</p>
+        <p><b>动作</b>：市价全平 / 按比例平仓（比如平 50%）/ 只报警（弹窗 + 响铃，不动仓位）。</p>
+        <p><b>几个细节</b></p>
+        <ul>
+          <li>同一条规则触发后，对这个币同方向的仓位冷却 N 分钟（N 就是这条规则的窗口长度），避免刚平一半马上又把剩下的平掉。冷却期间其他规则照常工作。</li>
+          <li>多条规则同时达到时，只执行最重的那个：全平 &gt; 按比例平 &gt; 只报警。</li>
+          <li>按比例平仓时，按合约最小下单张数向下取整；凑不出合法张数或者剩下的太少，就改为全平。</li>
+          <li>某个币超过 30 秒没收到标记价，就暂停对它的判断并报警，不会拿旧价格乱平。</li>
+          <li>程序刚启动时，会用过去的 1 分钟 K 线收盘价把窗口补满，所以重启后保护马上生效。</li>
+        </ul>
+      </div>
+    </details>
+    <details class="help">
+      <summary>怎么在 OKX 创建 API Key</summary>
+      <div>
+        <p><b>先建模拟盘 Key 试用</b>（用的是假钱）：</p>
+        <ol class="steps">
+          <li>电脑浏览器打开 <span class="mono">www.okx.com</span> 登录，顶部「交易」→「模拟交易」进入模拟盘。</li>
+          <li>模拟盘里点「个人中心」→「模拟交易 API」→「创建」。</li>
+          <li>权限<b>只勾「读取」和「交易」，不要勾「提现」</b>；IP 地址留空；Passphrase 自己设一串并记住。</li>
+          <li>创建后会显示 API Key、Secret Key。<b>Secret Key 只显示这一次</b>，马上复制到本程序「设置」里保存。</li>
+        </ol>
+        <p><b>试用满意后再建实盘 Key</b>：实盘页面右上角头像 →「API」→「创建 API Key」，其余同上。然后在「设置」里切到「实盘」，填实盘 Key。</p>
+        <div class="callout warn">
+          <b>为什么 IP 留空</b>：你是通过代理上网的，OKX 看到的 IP 是代理节点的，换节点就变。<br>
+          <b>代价</b>：OKX 规定，没绑 IP、带交易权限的 Key 连续 14 天没被使用会被自动删除。本程序开着就一直在用，不会被删；如果程序关了超过 14 天，就需要重建一把。<br>
+          <b>为什么不能勾提现</b>：本程序只需要平仓。万一 Key 泄露，没有提现权限，钱就转不走。勾了提现的 Key，本程序会直接拒绝使用。
+        </div>
+      </div>
+    </details>
+    <details class="help">
+      <summary>菜单栏图标是什么意思</summary>
+      <div>
+        <p>屏幕右上角菜单栏的「哨兵」图标：</p>
+        <ul>
+          <li>🟢 正常监控中</li>
+          <li>🟡 已暂停：只看不动，不会自动平仓</li>
+          <li>🔴 出问题了：断线、行情中断、Key 失效。点图标 →「打开控制面板」看原因</li>
+          <li>⚪ 还没填 API Key</li>
+          <li>⏳ 正在连接</li>
+        </ul>
+        <p>点图标还可以：打开控制面板、暂停 / 恢复自动平仓、停止响铃、退出。</p>
+      </div>
+    </details>
+    <details class="help">
+      <summary>遇到报警怎么办</summary>
+      <div>
+        <ul>
+          <li><b>「自动平仓失败」</b>：程序已自动重试 3 次都没成功。<b>立刻打开 OKX 手动处理</b>这个仓位。</li>
+          <li><b>「与 OKX 的连接中断」</b>：先看代理软件开着没有、节点能不能用。断线期间不会自动平仓。连上后会自动恢复。</li>
+          <li><b>「行情中断」</b>：某个币一直收不到价格，一般跟断线是同一个原因。</li>
+          <li><b>「仓位哨兵已停止工作」</b>：API Key 失效或被删除了。去「设置」重新填一把 Key。</li>
+          <li><b>怀疑程序乱平仓</b>：马上点「暂停自动平仓」（页面右上角，或者菜单栏图标里），然后去「记录」看它为什么触发。</li>
+          <li><b>怀疑 Key 泄露</b>：在 OKX 的 API 管理里把这把 Key 删掉，删掉后立刻失效。</li>
+        </ul>
+        <p>报警会弹窗并循环响铃，点弹窗的「知道了」或页面上的「停止响铃」就会停下。</p>
+      </div>
+    </details>
+    <details class="help">
+      <summary>它做不到的事（重要）</summary>
+      <div>
+        <ul>
+          <li><b>电脑关机、断电、睡眠、退出登录、代理断开、OKX 接口故障时，它不工作。</b></li>
+          <li>市价平仓会有滑点：行情剧烈时，实际成交价可能比触发时差不少。</li>
+          <li>它看的是标记价格，和盘口最新成交价会有细微差别。</li>
+        </ul>
+        <div class="callout bad"><b>所以每个仓位仍然要在 OKX 上挂原生止损</b>（持仓上的「止盈止损」）。原生止损挂在交易所的服务器上，电脑关机也照样有效；本程序是第二道防线。监控页会标出哪些仓位没挂原生止损。</div>
+      </div>
+    </details>
+    <details class="help">
+      <summary>这台电脑需要保持什么状态</summary>
+      <div>
+        <ul>
+          <li>插着电源。程序运行时会自己阻止电脑睡眠；屏幕可以关、可以锁屏。</li>
+          <li><b>不要退出登录</b>账户，也不要合上笔记本盖子（合盖会强制睡眠）。</li>
+          <li>代理软件开着，并且设成开机自启；打开「系统代理」，或者用 TUN / 增强模式。</li>
+          <li>建议关掉 macOS 自动安装更新（系统设置 → 通用 → 软件更新），免得半夜重启。</li>
+          <li>本程序默认开机自动运行（「设置」里可以关）。万一停电重启，要有人登录一次，程序才会运行。</li>
+        </ul>
+      </div>
+    </details>
+  </section>
+</div>
+
+<div id="saveBar" class="savebar hidden">
+  <span>规则有改动，还没保存</span>
+  <button class="btn" onclick="discardRules()">放弃改动</button>
+  <button class="btn primary" onclick="saveRules()">保存规则</button>
+</div>
+<div id="modalRoot"></div>
+<div id="toast"></div>
+
+<script>
+'use strict';
+// ------------------------------------------------------------------ 基础
+const TOKEN = (() => {
+  const m = location.hash.match(/t=([^&]+)/);
+  if (m) { try { sessionStorage.setItem('pgToken', m[1]); } catch (e) {} history.replaceState(null, '', location.pathname); return m[1]; }
+  try { return sessionStorage.getItem('pgToken') || ''; } catch (e) { return ''; }
+})();
+// 菜单栏再次「打开控制面板」时，浏览器可能复用这个标签页只改 #t=，此时换上新令牌重新加载
+window.addEventListener('hashchange', () => { if (/t=/.test(location.hash)) location.reload(); });
+const ENV = { demo: '模拟盘', live: '实盘' };
+const DIR = { adverse: '不利', favorable: '有利' };
+const ACT = { close_all: '市价全平', close_pct: '按比例平仓', alert: '只报警' };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+let S = null;            // 最新状态
+let tab = 'monitor';
+let logFilter = 'all';
+let draft = null, dirty = false;
+let setupKey = '';
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { 'X-Token': TOKEN, 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let j = {};
+  try { j = await r.json(); } catch (e) {}
+  if (!r.ok) { const err = new Error(j.error || ('请求失败 ' + r.status)); err.data = j; err.status = r.status; throw err; }
+  return j;
+}
+function toast(msg, isErr) {
+  const t = $('toast'); t.textContent = msg; t.className = 'show' + (isErr ? ' err' : '');
+  clearTimeout(toast._t); toast._t = setTimeout(() => (t.className = ''), isErr ? 5000 : 2600);
+}
+function modal(title, body, okText, opts = {}) {
+  return new Promise((resolve) => {
+    const root = $('modalRoot');
+    root.innerHTML = `<div class="modal-bg"><div class="modal"><h3>${esc(title)}</h3><div class="body">${opts.html ? body : esc(body)}</div>
+      <div class="btns">${opts.noCancel ? '' : '<button class="btn" id="mCancel">取消</button>'}<button class="btn ${opts.danger ? 'danger' : 'primary'}" id="mOk">${esc(okText || '确定')}</button></div></div></div>`;
+    const done = (v) => { root.innerHTML = ''; resolve(v); };
+    $('mOk').onclick = () => done(true);
+    if (!opts.noCancel) $('mCancel').onclick = () => done(false);
+  });
+}
+const pad = (n) => String(n).padStart(2, '0');
+function clock(ms) { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; }
+function stamp(ms) { const d = new Date(ms); return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock(ms)}`; }
+function px(p) {
+  if (p === null || p === undefined || p === '' || isNaN(+p)) return '—';
+  p = +p; const digits = p >= 1000 ? 2 : p >= 1 ? 4 : 8;
+  return p.toLocaleString('en-US', { maximumFractionDigits: digits });
+}
+function pct(v, d = 2) { return (v > 0 ? '+' : '') + (+v).toFixed(d) + '%'; }
+function win(m) { m = +m; return m < 1 ? Math.round(m * 60) + ' 秒' : (+m.toFixed(4)) + ' 分钟'; }
+function ruleText(r) {
+  const a = r.action === 'close_pct' ? `平 ${+r.close_pct}%` : ACT[r.action];
+  return `${win(r.window_min)}内${DIR[r.direction]}变动 ≥ ${+r.threshold_pct}% → ${a}`;
+}
+function ruleSentence(r) {
+  const w = parseFloat(r.window_min), t = parseFloat(r.threshold_pct), p = parseFloat(r.close_pct);
+  if (!(w > 0) || !(t > 0)) return '请填完整：时间窗口和涨跌幅都要大于 0';
+  const dir = r.direction === 'adverse' ? '朝对仓位不利的方向（多单跌 / 空单涨）' : '朝对仓位有利的方向（多单涨 / 空单跌）';
+  const act = r.action === 'close_all' ? '<b>市价全平</b>这个仓位' : r.action === 'close_pct' ? `<b>市价平掉 ${p || '?'}%</b>` : '<b>弹窗 + 响铃提醒</b>，不动仓位';
+  return `${r.enabled ? '' : '（已停用）'}和 ${win(w)}前的标记价比，${dir}变动达到 <b>${t}%</b> 时，${act}。`;
+}
+
+// ------------------------------------------------------------------ 顶部
+function renderTop() {
+  const s = S;
+  $('envBadge').textContent = ENV[s.env];
+  $('envBadge').className = 'env ' + s.env;
+  $('statusPill').className = 'pill ' + s.status;
+  $('statusText').textContent = s.status_text;
+  const ringing = s.sounding || s.alarms.some((a) => !a.acked);
+  $('ackBtn').classList.toggle('hidden', !ringing);
+  const pb = $('pauseBtn');
+  pb.textContent = s.paused ? '▶︎ 恢复自动平仓' : '⏸ 暂停自动平仓';
+  pb.className = 'btn' + (s.paused ? ' primary' : '');
+  pb.disabled = !s.creds_present[s.env];
+  $('alarms').innerHTML = s.alarms.map((a) => `
+    <div class="alarm ${a.acked ? 'acked' : ''}">
+      <div style="font-size:20px">${a.kind === 'event' ? '⚠️' : '🚨'}</div>
+      <div style="flex:1"><div class="t">${esc(a.title)}</div><div class="m">${esc(a.msg)}</div>
+      <div class="sub">${stamp(a.since)}${a.acked ? ' · 已确认，问题解决前会一直显示' : ''}</div></div>
+      ${a.acked ? '' : '<button class="btn small" onclick="ack()">知道了</button>'}
+    </div>`).join('');
+}
+
+// ------------------------------------------------------------------ 监控页
+function renderSetup() {
+  const s = S;
+  const key = s.env + ':' + s.creds_present[s.env];
+  if (key === setupKey) return;
+  setupKey = key;
+  const box = $('setupBox');
+  if (s.creds_present[s.env]) { box.innerHTML = ''; return; }
+  const live = s.env === 'live';
+  box.innerHTML = `
+    <div class="card">
+      <h2>第一步：填入${ENV[s.env]} API Key</h2>
+      <div class="sub">仓位哨兵需要一把 OKX API Key 才能看到你的仓位、在触发时帮你平仓。全程大约 3 分钟。</div>
+      <div class="radio">
+        ${['live', 'demo'].map((e) => `<label class="${s.env === e ? 'on' : ''}"><input type="radio" name="setupEnv" ${s.env === e ? 'checked' : ''} onchange="switchEnv('${e}', true)"><b>${ENV[e]}</b><div class="sub">${e === 'live' ? '真实账户，真钱' : '模拟交易，假钱'}</div></label>`).join('')}
+      </div>
+      <ol class="steps">
+        ${live
+          ? '<li>电脑浏览器打开 <span class="mono">www.okx.com</span> 登录，右上角头像 →「API」→「创建 API Key」。</li>'
+          : '<li>电脑浏览器打开 <span class="mono">www.okx.com</span> 登录，顶部「交易」→「模拟交易」进入模拟盘，再点「个人中心」→「模拟交易 API」→「创建」。</li>'}
+        <li>权限<b>只勾「读取」和「交易」，不要勾「提现」</b>；IP 地址<b>留空</b>；Passphrase 自己设一串并记住。</li>
+        <li>创建成功后，把下面三项复制进来。<b>Secret Key 只显示一次</b>，不要关掉那个页面，也不要截图或发给别人。</li>
+      </ol>
+      ${credForm(s.env, 'setup')}
+      ${live ? '' : '<div class="callout">先用模拟盘（假钱）把规则试顺手，确认没问题再到「设置」里切到实盘。</div>'}
+    </div>`;
+}
+function credForm(env, prefix) {
+  return `
+    <label class="f">API Key<input class="wide mono" type="text" id="${prefix}-${env}-k" autocomplete="off" spellcheck="false" placeholder="形如 1a2b3c4d-....">
+    </label>
+    <label class="f">Secret Key<input class="wide mono" type="password" id="${prefix}-${env}-s" autocomplete="off" placeholder="创建时只显示一次"></label>
+    <label class="f">Passphrase<input class="wide mono" type="password" id="${prefix}-${env}-p" autocomplete="off" placeholder="你创建时自己设的那串"></label>
+    <div class="row"><button class="btn primary" onclick="saveCreds('${env}','${prefix}', this)">保存并验证</button>
+    <span class="sub">会检查 Key 是否有效、权限是否只有「读取 + 交易」，通过后存进这台 Mac 的钥匙串。</span></div>
+    <div id="${prefix}-${env}-result"></div>`;
+}
+async function saveCreds(env, prefix, btn) {
+  const v = (x) => $(`${prefix}-${env}-${x}`).value.trim();
+  const out = $(`${prefix}-${env}-result`);
+  btn.disabled = true; btn.textContent = '正在验证…'; out.innerHTML = '';
+  try {
+    const r = await api('/api/credentials', { env, api_key: v('k'), secret_key: v('s'), passphrase: v('p') });
+    out.innerHTML = checksHtml(r.checks);
+    toast(`${ENV[env]} API Key 已保存`);
+    setupKey = ''; if (tab === 'settings') setTimeout(renderSettings, 300);
+    await refresh();
+  } catch (e) {
+    out.innerHTML = `<div class="callout bad">${esc(e.message)}</div>` + (e.data && e.data.checks ? checksHtml(e.data.checks) : '');
+  } finally { btn.disabled = false; btn.textContent = '保存并验证'; }
+}
+function checksHtml(list) {
+  if (!list || !list.length) return '';
+  const ic = { ok: '✓', warn: '!', fail: '✕' };
+  return `<ul class="checks">${list.map((c) => `<li><span class="ic ${c.state}">${ic[c.state] || '·'}</span><span><b>${esc(c.label)}</b>　${esc(c.msg)}</span></li>`).join('')}</ul>`;
+}
+function renderChecks() {
+  const s = S;
+  const show = s.creds_present[s.env] && (!s.ready || s.fatal || s.checks.some((c) => c.state !== 'ok'));
+  $('checkBox').innerHTML = show && s.checks.length ? `<div class="card"><h2>${s.fatal ? '需要处理' : s.ready ? '自检提示' : '正在自检'}</h2>${checksHtml(s.checks)}</div>` : '';
+}
+function renderPositions() {
+  const s = S;
+  const box = $('posBox');
+  if (!s.creds_present[s.env]) { box.innerHTML = ''; return; }
+  const noRules = !s.config.default_rules.length && !Object.keys(s.config.overrides).length;
+  let html = '';
+  if (noRules) html += `<div class="card callout warn" style="margin-top:16px"><b>还没有设置任何规则</b>：现在只监控、不会触发。去 <a href="#" onclick="go('rules');return false">「规则」</a> 页添加。</div>`;
+  if (!s.positions.length) {
+    html += `<div class="card empty">${s.ready ? '当前没有永续合约仓位。<br>开仓后会自动出现在这里，并按规则开始监控。' : '正在读取仓位…'}</div>`;
+    box.innerHTML = html; return;
+  }
+  for (const p of s.positions) {
+    const upl = +p.upl, ratio = +p.upl_ratio * 100;
+    const stale = p.price_age !== null && p.price_age > 30;
+    html += `<div class="card">
+      <div class="pos-head">
+        <span class="coin">${esc(p.coin)}</span>
+        <span class="tag ${p.side}">${p.side === 'long' ? '多单' : '空单'}</span>
+        <span class="tag">${esc(p.lever)}x · ${p.mgn_mode === 'cross' ? '全仓' : '逐仓'}</span>
+        <span class="tag">${esc(p.size)} 张</span>
+        ${p.in_flight ? '<span class="tag warnc">正在平仓…</span>' : ''}
+        <span class="spacer"></span>
+        ${p.has_native_sl ? '<span class="tag okc">✓ 已挂原生止损</span>' : '<span class="tag badc" title="建议在 OKX 上给这个仓位挂止损，电脑关机时它仍然有效">✕ 没挂原生止损</span>'}
+      </div>
+      <div class="grid num">
+        <div class="kv"><div class="k">标记价${stale ? '（已中断）' : ''}</div><div class="v ${stale ? 'down' : ''}">${px(p.mark_px)}</div></div>
+        <div class="kv"><div class="k">开仓均价</div><div class="v">${px(p.avg_px)}</div></div>
+        <div class="kv"><div class="k">未实现盈亏</div><div class="v ${upl >= 0 ? 'up' : 'down'}">${isNaN(upl) ? '—' : (upl >= 0 ? '+' : '') + upl.toFixed(2)}${isNaN(ratio) ? '' : ` <span class="sub">(${pct(ratio)})</span>`}</div></div>
+        <div class="kv"><div class="k">预估强平价</div><div class="v">${px(p.liq_px)}</div></div>
+      </div>
+      <div class="rules-live">
+        <div class="sub">${p.custom_rules ? `使用 <b>${esc(p.coin)} 单独规则</b>` : '使用 <b>默认规则</b>'} · 已有 ${p.history_sec < 60 ? Math.floor(Math.max(p.history_sec, 0)) + ' 秒' : Math.floor(p.history_sec / 60) + ' 分钟'}价格数据</div>
+        ${p.rules_count === 0 ? '<div class="sub" style="padding:8px 0">这个仓位没有生效的规则，只监控、不触发。</div>' : ''}
+        ${p.rules_count > 0 && !p.evals.length ? '<div class="sub" style="padding:8px 0">等待价格数据…</div>' : ''}
+        ${p.evals.map((e) => evalRow(e, s.now)).join('')}
+      </div>
+    </div>`;
+  }
+  box.innerHTML = html;
+}
+function evalRow(e, now) {
+  const ratio = Math.max(0, Math.min(1, e.move_pct / e.threshold_pct));
+  const cls = ratio >= 0.9 ? 'hi' : ratio >= 0.5 ? 'mid' : '';
+  let state = `离触发还差 ${Math.max(0, e.threshold_pct - e.move_pct).toFixed(2)}%`;
+  if (e.cooldown_until) state = `冷却中，${clock(e.cooldown_until)} 恢复`;
+  else if (e.hit) state = S.paused ? '已达到（暂停中，未执行）' : '已达到';
+  return `<div class="rl">
+    <div class="what">${esc(e.text)}</div>
+    <div class="calc num">${clock(e.anchor_ts)} 为 ${px(e.anchor_px)} → 现在 <span class="${e.change_pct >= 0 ? 'up' : 'down'}"><b>${pct(e.change_pct)}</b></span>${e.short_window ? '<br><span class="sub">数据还不满一个窗口，从最早的数据算起</span>' : ''}</div>
+    <div><div class="meter ${cls}"><i style="width:${(ratio * 100).toFixed(1)}%"></i></div><div class="meter-label">${esc(state)}</div></div>
+  </div>`;
+}
+
+// ------------------------------------------------------------------ 规则页
+function newId() { return Math.random().toString(16).slice(2, 10); }
+function newRule() { return { id: newId(), window_min: 5, direction: 'adverse', threshold_pct: 3, action: 'alert', close_pct: 50, enabled: true }; }
+function loadDraft() {
+  draft = JSON.parse(JSON.stringify({ default_rules: S.config.default_rules, overrides: S.config.overrides }));
+  dirty = false; $('saveBar').classList.add('hidden');
+}
+function markDirty() { dirty = true; $('saveBar').classList.remove('hidden'); }
+function rulesOf(scope) { return scope === '__default' ? draft.default_rules : draft.overrides[scope]; }
+function ruleTable(scope) {
+  const rules = rulesOf(scope);
+  if (!rules.length) return `<div class="sub" style="padding:10px 0">${scope === '__default' ? '还没有默认规则。' : '这个币没有规则：只监控、不会触发。'}</div>
+    <button class="btn small" onclick="addRule('${scope}')">＋ 添加规则</button>`;
+  return `<table class="rules"><thead><tr><th>时间窗口</th><th>方向</th><th>涨跌幅达到</th><th>动作</th><th>平仓比例</th><th>启用</th><th></th></tr></thead><tbody>
+    ${rules.map((r, i) => `
+      <tr class="${r.enabled ? '' : 'off'}">
+        <td><input type="number" min="0.04" max="360" step="any" value="${esc(r.window_min)}" data-s="${scope}" data-i="${i}" data-f="window_min"><span class="unit">分钟</span></td>
+        <td><select data-s="${scope}" data-i="${i}" data-f="direction">${Object.entries(DIR).map(([k, v]) => `<option value="${k}" ${r.direction === k ? 'selected' : ''}>${v}</option>`).join('')}</select></td>
+        <td><input type="number" min="0.01" max="99" step="any" value="${esc(r.threshold_pct)}" data-s="${scope}" data-i="${i}" data-f="threshold_pct"><span class="unit">%</span></td>
+        <td><select data-s="${scope}" data-i="${i}" data-f="action">${Object.entries(ACT).map(([k, v]) => `<option value="${k}" ${r.action === k ? 'selected' : ''}>${v}</option>`).join('')}</select></td>
+        <td>${r.action === 'close_pct' ? `<input type="number" min="1" max="99" step="1" value="${esc(r.close_pct)}" data-s="${scope}" data-i="${i}" data-f="close_pct"><span class="unit">%</span>` : '<span class="sub">—</span>'}</td>
+        <td><input type="checkbox" ${r.enabled ? 'checked' : ''} data-s="${scope}" data-i="${i}" data-f="enabled"></td>
+        <td><button class="btn ghost small" title="删除这条规则" onclick="delRule('${scope}',${i})">删除</button></td>
+      </tr>
+      <tr><td colspan="7" class="preview" id="pv-${scope}-${i}">${ruleSentence(r)}</td></tr>`).join('')}
+  </tbody></table>
+  <div class="row"><button class="btn small" onclick="addRule('${scope}')">＋ 添加规则</button></div>`;
+}
+function renderRules() {
+  if (!draft) loadDraft();
+  const posInsts = [...new Set(S.positions.map((p) => p.inst_id))].filter((i) => !(i in draft.overrides));
+  const live = S.env === 'live';
+  $('tab-rules').innerHTML = `
+    <div class="card">
+      <h2>默认规则</h2>
+      <div class="sub">所有仓位都用这套规则，以后新开的仓位也自动适用。某个币要特殊处理，就在下面「单独规则」里给它单独设一套。</div>
+      ${live ? '<div class="callout bad"><b>当前是实盘</b>：带「平仓」动作的规则会自动平掉真实仓位。</div>' : ''}
+      <div class="callout"><b>怎么算</b>：现在的标记价和 N 分钟前那一刻的标记价比，看涨跌了多少。「不利」= 多单遇跌、空单遇涨；「有利」反过来。满足任意一条就执行，同时满足多条时只执行最重的那个（全平 &gt; 按比例平 &gt; 只报警）。</div>
+      ${ruleTable('__default')}
+    </div>
+    <div class="card">
+      <h2>单独规则</h2>
+      <div class="sub">设了单独规则的币，<b>不再使用默认规则</b>，只看自己这套。想让某个币完全不触发，给它建一套空的单独规则即可。</div>
+      ${Object.keys(draft.overrides).map((inst) => `
+        <div class="override">
+          <div class="oh"><b>${esc(inst.split('-')[0])}</b><span class="sub mono">${esc(inst)}</span><span class="spacer"></span>
+            <button class="btn ghost small" onclick="delOverride('${esc(inst)}')">删除单独规则（改回用默认）</button></div>
+          ${ruleTable(inst)}
+        </div>`).join('')}
+      <div class="row">
+        <select id="ovSelect">
+          ${posInsts.map((i) => `<option value="${esc(i)}">${esc(i.split('-')[0])}（当前有仓位）</option>`).join('')}
+          <option value="__custom">其他币，手动输入…</option>
+        </select>
+        <button class="btn small" onclick="addOverride()">＋ 为这个币单独设置</button>
+      </div>
+    </div>`;
+}
+function onRuleInput(ev) {
+  const el = ev.target;
+  if (!el.dataset || !el.dataset.f) return;
+  const r = rulesOf(el.dataset.s)[+el.dataset.i];
+  const f = el.dataset.f;
+  r[f] = el.type === 'checkbox' ? el.checked : el.value;
+  markDirty();
+  if (f === 'action' || f === 'enabled') { renderRules(); return; }
+  const pv = $(`pv-${el.dataset.s}-${el.dataset.i}`);
+  if (pv) pv.innerHTML = ruleSentence(r);
+}
+function addRule(scope) {
+  const list = rulesOf(scope);
+  const base = list.length ? { ...list[list.length - 1], id: newId() } : newRule();
+  list.push(base); markDirty(); renderRules();
+}
+function delRule(scope, i) { rulesOf(scope).splice(i, 1); markDirty(); renderRules(); }
+async function addOverride() {
+  let inst = $('ovSelect').value;
+  if (inst === '__custom') {
+    const coin = (prompt('输入币种，比如 SOL（默认按 USDT 永续，也可以直接输入完整合约名如 SOL-USDC-SWAP）') || '').trim().toUpperCase();
+    if (!coin) return;
+    inst = coin.includes('-') ? coin : `${coin}-USDT-SWAP`;
+    if (!/^[A-Z0-9]+-[A-Z0-9]+-SWAP$/.test(inst)) { toast('合约名不对，应该像 BTC-USDT-SWAP', true); return; }
+  }
+  if (draft.overrides[inst]) return;
+  draft.overrides[inst] = draft.default_rules.map((r) => ({ ...r, id: newId() }));
+  markDirty(); renderRules();
+}
+function delOverride(inst) { delete draft.overrides[inst]; markDirty(); renderRules(); }
+function discardRules() { loadDraft(); renderRules(); }
+async function saveRules() {
+  const lines = [];
+  const desc = (rs) => rs.filter((r) => r.enabled).map((r) => '  · ' + ruleText(r)).join('\n') || '  · 无（只监控）';
+  lines.push('默认规则：\n' + desc(draft.default_rules));
+  for (const [inst, rs] of Object.entries(draft.overrides)) lines.push(`${inst.split('-')[0]} 单独规则：\n` + desc(rs));
+  const live = S.env === 'live';
+  const ok = await modal(live ? '保存规则（实盘，立即生效）' : '保存规则（立即生效）', lines.join('\n\n'), '确认保存', { danger: live });
+  if (!ok) return;
+  try {
+    S = await api('/api/rules', draft);
+    loadDraft(); renderRules(); renderAll();
+    toast('规则已保存，立即生效');
+  } catch (e) { toast(e.message, true); }
+}
+
+// ------------------------------------------------------------------ 记录页
+const LOGF = { trade: ['trigger', 'close_ok'], alarm: ['alarm'], sys: ['info', 'config'] };
+function renderLog() {
+  const icon = { trigger: '⚡', close_ok: '✅', alarm: '🚨', info: '·', config: '⚙︎' };
+  const list = S.events.filter((e) => logFilter === 'all' || LOGF[logFilter].includes(e.kind));
+  $('logList').innerHTML = list.length ? list.map((e) => `
+    <div class="ev ${e.kind}">
+      <div class="time num">${stamp(e.ts)}${e.env && e.env !== S.env ? `<br><span class="tag">${ENV[e.env]}</span>` : ''}</div>
+      <div class="title">${icon[e.kind] || '·'} ${esc(e.title)}</div>
+      ${e.detail ? `<div class="detail">${esc(e.detail)}</div>` : ''}
+    </div>`).join('') : '<div class="empty">暂无记录</div>';
+}
+
+// ------------------------------------------------------------------ 设置页
+function renderSettings() {
+  const s = S, c = s.config;
+  const credBlock = (env) => `
+    <div class="override" style="background:var(--panel)">
+      <div class="oh"><b>${ENV[env]} API Key</b>
+        ${s.creds_present[env] ? '<span class="tag okc">已保存</span>' : '<span class="tag">未设置</span>'}
+        <span class="spacer"></span>
+        ${s.creds_present[env] ? `<button class="btn ghost small" onclick="delCreds('${env}')">从本机删除</button>` : ''}</div>
+      <details ${s.creds_present[env] ? '' : 'open'}><summary class="sub" style="cursor:pointer;margin-top:6px">${s.creds_present[env] ? '更换这把 Key' : '填写'}</summary>${credForm(env, 'set')}</details>
+    </div>`;
+  $('tab-settings').innerHTML = `
+    <div class="card">
+      <h2>运行环境</h2>
+      <div class="sub">模拟盘用假钱，适合先把规则试顺手；实盘会对真实仓位自动平仓。两边的 API Key 是分开的。</div>
+      <div class="radio">
+        ${['demo', 'live'].map((e) => `<label class="${c.env === e ? 'on' : ''}"><input type="radio" name="env" value="${e}" ${c.env === e ? 'checked' : ''} onchange="switchEnv('${e}')"><b>${ENV[e]}</b><div class="sub">${s.creds_present[e] ? 'Key 已保存' : '还没填 Key'}</div></label>`).join('')}
+      </div>
+    </div>
+    <div class="card">
+      <h2>API Key</h2>
+      <div class="sub">保存在这台 Mac 的钥匙串里，不会发给任何人。权限必须是「读取 + 交易」，带「提现」权限的 Key 会被拒绝。怎么创建见「帮助」页。</div>
+      ${credBlock('demo')}${credBlock('live')}
+    </div>
+    <div class="card">
+      <h2>网络代理</h2>
+      <div class="sub">连 OKX 走的代理。一般选「自动」：读取 macOS 系统代理（代理软件打开「系统代理」后就有）。</div>
+      <div class="radio">
+        <label class="${c.proxy_mode === 'auto' ? 'on' : ''}"><input type="radio" name="pm" value="auto" ${c.proxy_mode === 'auto' ? 'checked' : ''}><b>自动（推荐）</b><div class="sub">当前读到：${s.proxy.system ? `<span class="mono">${esc(s.proxy.system)}</span>` : '没有系统代理'}</div></label>
+        <label class="${c.proxy_mode === 'manual' ? 'on' : ''}"><input type="radio" name="pm" value="manual" ${c.proxy_mode === 'manual' ? 'checked' : ''}><b>手动填写</b><div class="sub">比如 <span class="mono">http://127.0.0.1:7890</span></div></label>
+        <label class="${c.proxy_mode === 'off' ? 'on' : ''}"><input type="radio" name="pm" value="off" ${c.proxy_mode === 'off' ? 'checked' : ''}><b>不用代理</b><div class="sub">代理软件用 TUN / 增强模式时也可以选这个</div></label>
+      </div>
+      <label class="f">手动代理地址<input class="wide mono" type="text" id="proxyUrl" value="${esc(c.proxy_url)}" placeholder="http://127.0.0.1:7890"></label>
+      <div class="row"><button class="btn primary" onclick="saveProxy(this)">保存并重新连接</button><span class="sub">现在实际使用：${s.proxy.effective ? `<span class="mono">${esc(s.proxy.effective)}</span>` : '直连'}</span></div>
+    </div>
+    <div class="card">
+      <h2>报警</h2>
+      <div class="sub">触发和出问题时，这台 Mac 会弹窗并响铃。人不在电脑旁时听不到，可以另外接一个飞书群机器人，把消息推到手机。</div>
+      <div class="row"><button class="btn" onclick="testAlert(this)">发一条测试报警</button><span class="sub">能看到弹窗、听到声音就说明正常</span></div>
+      <label class="f">飞书群机器人地址（可选）<input class="wide mono" type="text" id="feishu" value="${esc(c.feishu_webhook)}" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."></label>
+      <div class="row"><button class="btn" onclick="saveFeishu(this)">保存</button><span class="sub">飞书里建一个只有你自己的群 → 群设置 →「群机器人」→ 添加「自定义机器人」→ 复制 webhook 地址</span></div>
+    </div>
+    <div class="card">
+      <h2>开机自动运行</h2>
+      <label class="row" style="cursor:pointer"><input type="checkbox" id="autostart" ${c.autostart ? 'checked' : ''} onchange="saveAutostart(this)"> 登录这台 Mac 后自动启动仓位哨兵；程序意外崩溃也会自动重新打开</label>
+    </div>
+    <div class="row" style="margin-top:16px"><span class="sub">仓位哨兵 ${esc(s.version)}</span>
+      <button class="btn ghost small" onclick="api('/api/open-logs', {})">打开日志文件夹</button><span class="sub">出问题时把里面的 app.log 发给帮你装程序的人（日志里没有 Key）</span></div>`;
+  document.querySelectorAll('input[name=pm]').forEach((el) => el.addEventListener('change', () => {
+    document.querySelectorAll('input[name=pm]').forEach((x) => x.parentElement.classList.toggle('on', x.checked));
+  }));
+}
+async function switchEnv(env, quiet) {
+  if (env === S.env) return;
+  if (env === 'live' && !quiet) {
+    const ok = await modal('切换到实盘？', '切到实盘后，规则会对真实仓位自动平仓。\n\n建议：第一天先把所有规则的动作都设成「只报警」，观察触发频率是否符合预期，再改成平仓。', '切换到实盘', { danger: true });
+    if (!ok) { renderSettings(); return; }
+  }
+  try { S = await api('/api/settings', { env }); setupKey = ''; renderAll(); renderSettings(); toast(`已切换到${ENV[env]}`); }
+  catch (e) { toast(e.message, true); renderSettings(); }
+}
+async function saveProxy(btn) {
+  const mode = document.querySelector('input[name=pm]:checked').value;
+  btn.disabled = true;
+  try { S = await api('/api/settings', { proxy_mode: mode, proxy_url: $('proxyUrl').value.trim() }); renderSettings(); toast('已保存，正在重新连接'); }
+  catch (e) { toast(e.message, true); } finally { btn.disabled = false; }
+}
+async function saveFeishu(btn) {
+  btn.disabled = true;
+  try { S = await api('/api/settings', { feishu_webhook: $('feishu').value.trim() }); toast('已保存'); }
+  catch (e) { toast(e.message, true); } finally { btn.disabled = false; }
+}
+async function saveAutostart(el) {
+  try { S = await api('/api/settings', { autostart: el.checked }); toast(el.checked ? '已开启开机自启' : '已关闭开机自启'); }
+  catch (e) { toast(e.message, true); }
+}
+async function testAlert(btn) {
+  btn.disabled = true;
+  try { await api('/api/test-alert', {}); toast('已发送测试报警'); } catch (e) { toast(e.message, true); } finally { btn.disabled = false; }
+}
+async function delCreds(env) {
+  const ok = await modal(`删除本机保存的${ENV[env]} Key？`, '只是从这台 Mac 上删掉，OKX 上的 Key 不受影响。删除后程序将无法监控这个环境，直到重新填写。\n\n如果怀疑 Key 泄露，请同时去 OKX 的 API 管理里删除它。', '删除', { danger: true });
+  if (!ok) return;
+  try { S = await api('/api/credentials/delete', { env }); setupKey = ''; renderAll(); renderSettings(); toast('已删除'); }
+  catch (e) { toast(e.message, true); }
+}
+
+// ------------------------------------------------------------------ 动作 / 刷新
+async function ack() { try { S = await api('/api/ack', {}); renderAll(); } catch (e) { toast(e.message, true); } }
+async function togglePause() {
+  const to = !S.paused;
+  if (to) {
+    const ok = await modal('暂停自动平仓？', '暂停后仍然会监控和显示，但规则达到时不会平仓，也不会响铃。记得之后恢复。', '暂停');
+    if (!ok) return;
+  }
+  try { S = await api('/api/pause', { paused: to }); renderAll(); toast(to ? '已暂停自动平仓' : '已恢复自动平仓'); }
+  catch (e) { toast(e.message, true); }
+}
+function go(t) {
+  tab = t;
+  document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === t));
+  ['monitor', 'rules', 'log', 'settings', 'help'].forEach((x) => $('tab-' + x).classList.toggle('hidden', x !== t));
+  if (!S) return;
+  if (t === 'rules') renderRules();
+  if (t === 'settings') renderSettings();
+  if (t === 'log') renderLog();
+}
+function renderAll() {
+  if (!S) return;
+  renderTop();
+  if (tab === 'monitor') { renderSetup(); renderChecks(); renderPositions(); }
+  if (tab === 'log') renderLog();
+  if (tab === 'rules' && !dirty && !document.activeElement.closest('#tab-rules')) { loadDraft(); renderRules(); }
+}
+let failCount = 0;
+async function refresh() {
+  try {
+    S = await api('/api/state');
+    failCount = 0;
+    if (!draft) loadDraft();
+    renderAll();
+  } catch (e) {
+    failCount++;
+    if (e.status === 401) { $('statusPill').className = 'pill error'; $('statusText').textContent = e.message; return; }
+    if (failCount >= 3) { $('statusPill').className = 'pill error'; $('statusText').textContent = '连不上仓位哨兵程序：它可能已经退出，请重新打开'; }
+  }
+}
+document.getElementById('tabs').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) go(b.dataset.tab); });
+document.getElementById('logChips').addEventListener('click', (e) => {
+  const b = e.target.closest('.chip'); if (!b) return;
+  logFilter = b.dataset.f;
+  document.querySelectorAll('#logChips .chip').forEach((x) => x.classList.toggle('on', x === b));
+  renderLog();
+});
+document.getElementById('tab-rules').addEventListener('input', onRuleInput);
+document.getElementById('tab-rules').addEventListener('change', (e) => { if (e.target.tagName === 'SELECT' || e.target.type === 'checkbox') onRuleInput(e); });
+window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>
